@@ -1,0 +1,77 @@
+version: hvac_v1
+vertical: hvac
+threshold: 60
+
+# NOTE: ratingCount and rating are deliberately absent from scoring.
+# ratingCount is a segment label only (ADR-022); rating rated 4.6-5.0 across
+# all 20 sampled Houston businesses and discriminated nothing (ADR-021).
+
+fit_rules:
+  - id: field_service_software
+    track: fit
+    when: {signal: booking_vendor, op: in, value: [servicetitan, jobber, housecallpro]}
+    points: 30
+    label: "Uses {booking_vendor}"
+
+  - id: runs_google_ads
+    track: fit
+    when: {signal: runs_google_ads, op: is_true}
+    points: 25
+    label: "Running Google Ads"
+
+  - id: employee_band
+    track: fit
+    when:
+      all:
+        - {signal: estimated_employees, op: gte, value: 10}
+        - {signal: estimated_employees, op: lte, value: 40}
+    points: 25
+    label: "{estimated_employees} employees"
+    on_missing: skip
+
+  - id: has_online_booking
+    track: fit
+    when: {signal: has_booking_link, op: is_true}
+    points: 20
+    label: "Has online booking"
+
+pain_rules:
+  - id: closed_weekends
+    track: pain
+    when: {signal: closed_weekends, op: is_true}
+    points: 30
+    label: "Closed Saturday and Sunday in an emergency trade"
+
+  - id: closes_before_6pm
+    track: pain
+    when: {signal: closes_before_6pm, op: is_true}
+    points: 25
+    label: "Closes before 6pm on weekdays"
+
+  - id: phone_only_intake
+    track: pain
+    when: {signal: is_phone_only, op: is_true}
+    points: 25
+    label: "No online booking — every lead arrives as a phone call"
+
+  - id: no_chat_widget
+    track: pain
+    when: {signal: has_chat_widget, op: is_false}
+    points: 20
+    label: "No chat widget"
+
+  # Dormant until the SerpApi enrichment pass runs (ADR-020).
+  - id: missed_call_complaints
+    track: pain
+    when: {signal: missed_call_complaints_90d, op: gte, value: 3}
+    points: 30
+    label: "{missed_call_complaints_90d} recent reviews mention unanswered calls"
+    evidence: complaint_quotes
+    on_missing: skip
+
+  - id: review_velocity
+    track: pain
+    when: {signal: review_velocity_90d, op: gte, value: 5}
+    points: 15
+    label: "{review_velocity_90d} reviews/month — high call volume"
+    on_missing: skip
