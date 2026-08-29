@@ -87,8 +87,11 @@ class Signals(Base):               # REBUILDABLE — all columns nullable
     employee_est_source: Mapped[str | None] = mapped_column(String)
     has_office_admin: Mapped[bool | None] = mapped_column(Boolean)
     owner_growth_focused: Mapped[bool | None] = mapped_column(Boolean)
-    extracted_at: Mapped[datetime] = mapped_column(DateTime)
-    extractor_version: Mapped[str] = mapped_column(String)
+    # Defaults let tests build a Signals row directly (bypassing
+    # ExtractSignalsStage, which always sets both explicitly) without
+    # tripping the NOT NULL constraint — mirrors Score.scored_at.
+    extracted_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    extractor_version: Mapped[str] = mapped_column(String, default="unknown")
 
 
 class Score(Base):                 # REBUILDABLE
