@@ -2437,7 +2437,7 @@ git commit -m "feat: add error taxonomy, retry policy, and Stage template method
 
 **Interfaces:**
 - Consumes: `SearchProvider` (Task 8), `segment_for` (Task 3), `validate_phone` (Task 3), `Business`, `Run`, `RunBusiness`, `SearchQuery`, `RawPayload`, `ApiCall` (Task 2)
-- Produces: `SearchPlan(vertical: str, search_terms: list[str], locations: list[str], pages_per_query: int)`, `build_search_plan(vertical: str, state: str | None, location: str | None, config: dict) -> SearchPlan`, and `DiscoverStage(provider: SearchProvider)` with `discover(session, run_id, plan) -> StageReport`
+- Produces: `SearchPlan(vertical: str, search_terms: list[str], locations: list[str], pages_per_query: int)`, `build_search_plan(vertical, state, location, verticals_cfg: dict, locations_cfg: dict, pages_per_query: int = 5) -> SearchPlan` (TWO config dicts — Task 17 CLI calls it that way; Step 3 code is authoritative), and `DiscoverStage(provider: SearchProvider)` with `discover(session, run_id, plan) -> StageReport`
 
 - [ ] **Step 1: Write the failing test**
 
