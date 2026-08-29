@@ -15,7 +15,11 @@ class ManualFacts(Base):           # PERMANENT — never wiped by a rebuild (ADR
     has_office_admin: Mapped[bool | None] = mapped_column(Boolean)
     owner_growth_focused: Mapped[bool | None] = mapped_column(Boolean)
     notes: Mapped[str | None] = mapped_column(String)
-    updated_at: Mapped[datetime] = mapped_column(DateTime)
+    # default=utcnow: mirrors Business.updated_at / Score.scored_at so
+    # constructing ManualFacts without an explicit timestamp still satisfies
+    # the NOT NULL column (Task 13's tests rely on this).
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow,
+                                                 onupdate=datetime.utcnow)
 
 
 class Contact(Base):               # PERMANENT — manual in v1, resolvers in v2
