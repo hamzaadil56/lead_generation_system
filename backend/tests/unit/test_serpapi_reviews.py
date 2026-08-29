@@ -52,3 +52,30 @@ def test_respects_max_pages_ceiling():
 def test_reviews_without_dates_are_skipped_not_crashed():
     p = PagedProvider([[ReviewRecord(iso_date=None), ReviewRecord(iso_date=_iso(2))]])
     assert len(collect_recent_reviews(p, "cid1")) == 1
+
+
+def test_naive_iso_date_within_window_is_kept_not_dropped():
+    """SerpApi's exact date format has never been observed live. A
+    timezone-naive timestamp (no offset) must be treated as UTC and kept,
+    not silently dropped, or review_velocity_90d would be understated."""
+    naive = (datetime.now(UTC) - timedelta(days=5)).replace(tzinfo=None).isoformat()
+    p = PagedProvider([[ReviewRecord(iso_date=naive)]])
+    assert len(collect_recent_reviews(p, "cid1")) == 1
+
+
+def test_malformed_iso_date_is_skipped_not_crashed():
+    """One bad record must not kill the whole enrichment pass (Task 16 calls
+    this for every enriched lead)."""
+    p = PagedProvider([[
+        ReviewRecord(iso_date="not-a-date"),
+        ReviewRecord(iso_date=_iso(2)),
+    ]])
+    assert len(collect_recent_reviews(p, "cid1")) == 1
+
+
+def test_z_suffixed_iso_date_parses_and_compares_correctly():
+    """The Z suffix is the format most likely to come back from the real
+    API and must not regress."""
+    z_suffixed = (datetime.now(UTC) - timedelta(days=5)).isoformat().replace("+00:00", "Z")
+    p = PagedProvider([[ReviewRecord(iso_date=z_suffixed)]])
+    assert len(collect_recent_reviews(p, "cid1")) == 1

@@ -36,6 +36,27 @@ class SerpApiReviewProvider:
         )
 
 
+def _parse_iso_date(iso_date: str) -> datetime | None:
+    """Parse a review's iso_date into an aware UTC datetime.
+
+    SerpApi's exact date format has never been observed in production, so
+    this must tolerate whatever comes back rather than crash the whole
+    collection call for one bad record:
+      - malformed string -> None (caller skips the review)
+      - naive result -> treated as UTC (SerpApi timestamps are UTC in
+        practice; dropping an otherwise-good review would silently
+        understate review_velocity_90d)
+      - already-aware result -> returned as-is
+    """
+    try:
+        parsed = datetime.fromisoformat(iso_date)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
+
+
 def collect_recent_reviews(provider: ReviewProvider, data_id: str,
                            days: int = 90, max_pages: int = 4) -> list[ReviewRecord]:
     """Page newest-first, stopping at the first page with nothing recent."""
@@ -45,10 +66,13 @@ def collect_recent_reviews(provider: ReviewProvider, data_id: str,
 
     for _ in range(max_pages):
         result = provider.reviews(data_id, token)
-        recent = [
-            r for r in result.reviews
-            if r.iso_date and datetime.fromisoformat(r.iso_date) >= cutoff
-        ]
+        recent = []
+        for r in result.reviews:
+            if not r.iso_date:
+                continue
+            parsed = _parse_iso_date(r.iso_date)
+            if parsed is not None and parsed >= cutoff:
+                recent.append(r)
         collected.extend(recent)
         if not recent or not result.next_page_token:
             break
