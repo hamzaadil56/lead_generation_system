@@ -1345,7 +1345,7 @@ git commit -m "feat: add rules engine with skip-based coverage normalisation"
 
 **Interfaces:**
 - Consumes: `Ruleset`, `Rule` (Task 6)
-- Produces: `load_ruleset(raw: dict) -> Ruleset` (pure — takes parsed YAML, does no file I/O, keeping the domain clean) and `read_ruleset_file(path: Path) -> Ruleset` in `app/services/`, which does the I/O
+- Produces: `load_ruleset(raw: dict) -> Ruleset` (pure — takes parsed YAML, does no file I/O, keeping the domain clean). **`read_ruleset_file` is NOT produced here** — Task 14 creates it in `app/services/rulesets.py`, and Tasks 14 and 17 import it from there. Do not create it in this task.
 
 - [ ] **Step 1: Write the ruleset**
 
