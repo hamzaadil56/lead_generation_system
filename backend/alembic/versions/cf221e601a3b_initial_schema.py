@@ -35,8 +35,8 @@ def upgrade() -> None:
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('status', sa.String(), nullable=False),
     sa.Column('source', sa.String(), nullable=False),
-    sa.Column('search_plan', sa.JSON(), nullable=True),
-    sa.Column('stats', sa.JSON(), nullable=True),
+    sa.Column('search_plan', sa.JSON(), nullable=False),
+    sa.Column('stats', sa.JSON(), nullable=True),  # end-of-run counts, absent until completion
     sa.Column('max_cost_usd', sa.Float(), nullable=True),
     sa.Column('estimated_cost', sa.Float(), nullable=True),
     sa.Column('actual_cost', sa.Float(), nullable=True),

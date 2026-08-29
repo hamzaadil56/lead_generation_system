@@ -12,7 +12,9 @@ class Run(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     status: Mapped[str] = mapped_column(String)  # queued|running|complete|failed
     source: Mapped[str] = mapped_column(String)  # ui|cli
-    search_plan: Mapped[dict | None] = mapped_column(JSON)
+    search_plan: Mapped[dict] = mapped_column(JSON)  # a Run is always created from a SearchPlan
+    # nullable: end-of-run counts ({searched, found, new}); absent while the
+    # run is still `queued`/`running` and only written on completion.
     stats: Mapped[dict | None] = mapped_column(JSON)
     max_cost_usd: Mapped[float | None] = mapped_column(Float)
     estimated_cost: Mapped[float | None] = mapped_column(Float)
