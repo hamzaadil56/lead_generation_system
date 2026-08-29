@@ -87,3 +87,63 @@ def test_all_group_requires_every_condition():
     ], pain_rules=[])
     assert evaluate({"a": True, "b": True}, rs).fit_score == 100
     assert evaluate({"a": True, "b": False}, rs).fit_score == 0
+
+
+def test_on_missing_zero_with_comparison_operator_does_not_crash():
+    """A 'zero' rule stays in the denominator even when its signal is
+    genuinely absent. Absent compared against a number is False, not a
+    TypeError — 'unknown >= 10' is not true."""
+    rs = Ruleset(version="z", vertical="hvac", threshold=60, fit_rules=[
+        Rule(id="gte_rule", track="fit",
+             when={"signal": "employees", "op": "gte", "value": 10},
+             points=50, label="gte", on_missing="zero"),
+        Rule(id="lte_rule", track="fit",
+             when={"signal": "employees", "op": "lte", "value": 10},
+             points=50, label="lte", on_missing="zero"),
+    ], pain_rules=[])
+    r = evaluate({}, rs)
+    assert r.fit_score == 0
+    assert r.coverage == 1.0     # both rules stayed in the denominator
+
+
+def test_on_missing_zero_with_gt_and_lt_does_not_crash():
+    rs = Ruleset(version="z2", vertical="hvac", threshold=60, fit_rules=[
+        Rule(id="gt_rule", track="fit",
+             when={"signal": "employees", "op": "gt", "value": 10},
+             points=50, label="gt", on_missing="zero"),
+        Rule(id="lt_rule", track="fit",
+             when={"signal": "employees", "op": "lt", "value": 10},
+             points=50, label="lt", on_missing="zero"),
+    ], pain_rules=[])
+    r = evaluate({}, rs)
+    assert r.fit_score == 0
+    assert r.coverage == 1.0
+
+
+def test_is_null_and_not_null_unaffected_by_the_none_guard():
+    rs = Ruleset(version="n", vertical="hvac", threshold=60, fit_rules=[
+        Rule(id="is_null_rule", track="fit",
+             when={"signal": "employees", "op": "is_null"},
+             points=50, label="null", on_missing="zero"),
+        Rule(id="not_null_rule", track="fit",
+             when={"signal": "employees", "op": "not_null"},
+             points=50, label="not null", on_missing="zero"),
+    ], pain_rules=[])
+    r = evaluate({}, rs)
+    assert r.fit_score == 50     # is_null matches on an absent signal, not_null doesn't
+
+
+def test_all_group_with_one_absent_signal_is_excluded_from_denominator():
+    """_signals_used must recurse into an `all` group over two *different*
+    signal names so a skip-rule with one present and one absent signal is
+    excluded entirely, not partially scored."""
+    rs = Ruleset(version="mix", vertical="hvac", threshold=60, fit_rules=[
+        Rule(id="combo", track="fit",
+             when={"all": [{"signal": "present", "op": "is_true"},
+                           {"signal": "absent", "op": "is_true"}]},
+             points=100, label="both"),
+    ], pain_rules=[])
+    r = evaluate({"present": True}, rs)
+    assert r.coverage == 0.0
+    assert r.fit_score == 0
+    assert r.reasons == []
