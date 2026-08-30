@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import structlog
@@ -10,7 +11,12 @@ from tenacity import (
     wait_exponential,
 )
 
-from app.core.errors import BusinessPermanentError, RunPermanentError, TransientError
+from app.core.errors import (
+    BudgetExceeded,
+    BusinessPermanentError,
+    RunPermanentError,
+    TransientError,
+)
 from app.models.business import Business, BusinessStatus
 
 log = structlog.get_logger()
@@ -51,12 +57,33 @@ class Stage(ABC):
     def _process_with_retry(self, business: Business, session: Session) -> None:
         self.process(business, session)
 
-    def run(self, session: Session, run_id: int | None, limit: int = 500) -> StageReport:
+    def run(self, session: Session, run_id: int | None, limit: int = 500,
+            budget_check: Callable[[Session], None] | None = None) -> StageReport:
+        """`budget_check` is called BEFORE each business and may raise
+        `BudgetExceeded`. The ceiling has to be enforced here rather than
+        only at stage boundaries: `scrape` is the only stage that spends
+        meaningful cash and, once entered, it used to run to completion --
+        so `--max-cost 0.05` really did spend ~$0.60 (I1).
+
+        Stopping mid-stage is clean by construction: the businesses that
+        were not reached keep their current status, so the run resumes
+        exactly where it left off.
+        """
         self._run_id = run_id
         report = StageReport()
         consecutive_fatal = 0
 
         for business in self.select(session, run_id, limit):
+            if budget_check is not None:
+                try:
+                    budget_check(session)
+                except BudgetExceeded as exc:
+                    report.aborted = True
+                    report.reason = str(exc)
+                    log.warning("stage.budget_exceeded", stage=self.name,
+                                reason=str(exc))
+                    break
+
             try:
                 # A SAVEPOINT scopes rollback to *this business only*: on
                 # failure only this unit of work unwinds, leaving prior

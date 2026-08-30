@@ -1,6 +1,7 @@
 import structlog
 from sqlalchemy.orm import Session
 
+from app.core.errors import BudgetExceeded
 from app.models.derived import ApiCall
 
 log = structlog.get_logger()
@@ -18,9 +19,12 @@ PROVIDER_PRICE_PER_CREDIT: dict[str, float] = {
 DEFAULT_PRICE_PER_CREDIT = 0.00
 
 
-class BudgetExceeded(Exception):
-    # Raised between businesses so a run stops rather than overspending.
-    pass
+# Re-exported: `BudgetExceeded` now lives in app.core.errors so
+# app.pipeline can catch it per business without importing app.services.
+# It is raised between businesses (Stage.run's budget_check hook) as well
+# as at stage boundaries, so a run stops rather than overspending.
+__all__ = ["BudgetExceeded", "spend_usd", "check_budget",
+           "PROVIDER_PRICE_PER_CREDIT", "DEFAULT_PRICE_PER_CREDIT"]
 
 
 def _price_for(provider: str) -> float:

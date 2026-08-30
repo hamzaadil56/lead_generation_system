@@ -186,3 +186,57 @@ def test_run_all_reaches_a_terminal_state_when_a_stage_raises_a_non_budget_error
     assert run.status in ("failed", "complete")  # terminal, never "running"
     assert run.status != "running"
     assert run.finished_at is not None
+
+
+def test_max_cost_is_enforced_inside_scrape_not_only_between_stages(cli_env):
+    """I1: `--max-cost 0.05` still spent ~$0.60. The ceiling was checked
+    once per stage boundary, and `scrape` — the only real cash spender —
+    runs to completion once entered, so the guard could not bound it.
+
+    With a $0.02 ceiling: discover logs 4 queries x 3 Serper credits =
+    $0.012, then scrape may bill only a handful of $0.002 Firecrawl calls
+    before the per-business check trips. Overshoot is bounded by one
+    business's cost. Before the fix scrape ran to completion and nothing
+    was left DISCOVERED."""
+    result = _invoke_run_all(["--max-cost", "0.02"])
+    assert result.exit_code != 0
+
+    firecrawl_calls = cli_env.query(ApiCall).filter_by(provider="firecrawl").count()
+    assert 0 < firecrawl_calls <= 8, firecrawl_calls
+    assert spend_usd(cli_env, cli_env.query(Run).one().id) <= 0.023
+
+    # Stopping mid-stage is clean: the rest are resumable, not FAILED.
+    assert cli_env.query(Business).filter_by(
+        status=BusinessStatus.DISCOVERED).count() > 0
+    assert cli_env.query(Business).filter_by(
+        status=BusinessStatus.FAILED).count() == 0
+
+    run = cli_env.query(Run).one()
+    assert run.status == "failed"
+    assert run.finished_at is not None
+
+
+class _OutOfCreditsScraper:
+    def scrape(self, url):
+        from app.core.errors import RunPermanentError
+        raise RunPermanentError("firecrawl: HTTP 402", status_code=402)
+
+
+def test_an_aborted_stage_stops_run_all_and_exits_non_zero(cli_env, monkeypatch):
+    """I3: `StageReport.aborted` was echoed and then ignored. Firecrawl
+    401s five times, the breaker aborts `scrape`, and run-all used to
+    carry on to extract/score/enrich, mark the Run `complete` and exit 0 —
+    handing the operator a CSV that looks like a normal run and is missing
+    90% of its leads."""
+    monkeypatch.setattr(cli, "FirecrawlScraper", lambda: _OutOfCreditsScraper())
+
+    result = _invoke_run_all()
+
+    assert result.exit_code != 0
+    run = cli_env.query(Run).one()
+    assert run.status == "failed"
+    assert run.finished_at is not None
+    # Nothing downstream of the aborted stage may have run.
+    assert cli_env.query(Score).count() == 0
+    assert cli_env.query(Business).filter_by(
+        status=BusinessStatus.SCORED).count() == 0

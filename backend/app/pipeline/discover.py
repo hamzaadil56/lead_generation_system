@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from datetime import datetime
 
 import structlog
@@ -10,7 +11,12 @@ from tenacity import (
 )
 
 from app.clients.protocols import SearchProvider, PlaceRecord
-from app.core.errors import BusinessPermanentError, RunPermanentError, TransientError
+from app.core.errors import (
+    BudgetExceeded,
+    BusinessPermanentError,
+    RunPermanentError,
+    TransientError,
+)
 from app.domain.segments import segment_for
 from app.domain.phone import validate_phone
 from app.models.business import Business, BusinessStatus
@@ -44,11 +50,23 @@ class DiscoverStage:
         return self._provider.search(query, page=page)
 
     def discover(self, session: Session, run_id: int | None,
-                 plan: SearchPlan) -> StageReport:
+                 plan: SearchPlan,
+                 budget_check: Callable[[Session], None] | None = None
+                 ) -> StageReport:
         report = StageReport()
 
         for query in plan.queries:
             for page in range(1, plan.pages_per_query + 1):
+                # Checked before each paid call, not once per stage (I1).
+                if budget_check is not None:
+                    try:
+                        budget_check(session)
+                    except BudgetExceeded as exc:
+                        report.aborted = True
+                        report.reason = str(exc)
+                        log.warning("discover.budget_exceeded", reason=str(exc))
+                        session.commit()
+                        return report
                 try:
                     result = self._search(query, page)
                 except RunPermanentError as exc:

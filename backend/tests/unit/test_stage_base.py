@@ -130,3 +130,45 @@ def test_transient_error_that_never_succeeds_is_handled_as_a_business_failure(se
     assert b.status is BusinessStatus.FAILED
     assert b.failed_stage == "test"
     assert "upstream timeout" in b.error_message
+
+
+def test_budget_ceiling_stops_a_stage_between_businesses(session):
+    """I1: `check_budget` was only ever called at stage boundaries, and
+    `scrape` — the only real cash spender — runs to completion once
+    entered, so `--max-cost 0.05` still spent ~$0.60. `budget.py:22` and
+    `cli.py:93` both claimed the check happened between businesses;
+    nothing did. A stop must also be clean: untouched businesses stay in
+    their current status so the run is resumable."""
+    from app.core.errors import BudgetExceeded
+
+    for cid in ["a", "b", "c", "d", "e"]:
+        session.add(Business(cid=cid, name=cid, status=BusinessStatus.DISCOVERED))
+    session.commit()
+
+    seen = 0
+
+    def budget_check(_session):
+        nonlocal seen
+        seen += 1
+        if seen > 2:
+            raise BudgetExceeded("spent $0.06 of $0.05 ceiling")
+
+    class Spender(Stage):
+        name = "test"
+        consumes = BusinessStatus.DISCOVERED
+        produces = BusinessStatus.SITE_SCRAPED
+
+        def process(self, business, session):
+            pass
+
+    report = Spender().run(session, run_id=None, limit=10,
+                           budget_check=budget_check)
+
+    assert report.aborted is True
+    assert report.processed == 2
+    assert "ceiling" in (report.reason or "")
+    # The three untouched businesses are resumable, not FAILED.
+    remaining = session.query(Business).filter_by(
+        status=BusinessStatus.DISCOVERED).all()
+    assert len(remaining) == 3
+    assert all(b.failed_stage is None for b in remaining)
