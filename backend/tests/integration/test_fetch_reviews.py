@@ -171,3 +171,70 @@ def test_monthly_ceiling_stops_the_stage(session):
     assert len(provider.calls) == 1
     assert report.processed == 1
     assert report.reason is not None
+
+
+def test_serpapi_response_is_persisted_to_raw_payloads(session):
+    """C4/ADR-003: `raw_payloads` is the permanent record every other paid
+    stage writes, and `derived.py` already lists `serpapi_reviews` as an
+    expected source. Without it, `reviews` is not rebuildable from
+    anything and the enrichment spend is unrecoverable."""
+    from app.models.derived import RawPayload
+    _scored(session, "c1", fit=90)
+    provider = PagedReviewProvider([
+        [ReviewRecord(iso_date=_recent(5), snippet="a")],
+        [ReviewRecord(iso_date=_recent(6), snippet="b")],
+    ])
+    FetchReviewsStage(provider, top_n=1).run(session, run_id=None)
+
+    payloads = session.query(RawPayload).filter_by(
+        source="serpapi_reviews").all()
+    assert len(payloads) == 2          # one per real provider call
+    assert all(p.payload is not None for p in payloads)
+
+
+def test_signals_survive_the_adr_003_drop_and_rebuild_workflow(session):
+    """C4's reproduction. ADR-003 promises that dropping the derived tables
+    and re-running the pure stages is free and lossless. It was not: nothing
+    could re-derive `missed_call_complaints_90d`, so pain collapsed 45 -> 20
+    and the permanent `api_calls` marker meant the business could never be
+    re-enriched at any price."""
+    from app.models.derived import Signals
+    from app.pipeline.extract_signals import ExtractSignalsStage
+
+    b = _scored(session, "c1", fit=90)
+    complaints = [ReviewRecord(iso_date=_recent(5), snippet="nobody answered")
+                  for _ in range(4)]
+    FetchReviewsStage(FakeReviewProvider(complaints), top_n=1).run(
+        session, run_id=None)
+
+    ExtractSignalsStage().run(session, run_id=None)
+    before = session.query(Signals).filter_by(business_id=b.id).one()
+    assert before.missed_call_complaints_90d == 4
+
+    # The documented recovery: drop the derived signals, re-run the pure
+    # stage. `reviews` and `raw_payloads` are what it must rebuild from.
+    session.query(Signals).filter_by(business_id=b.id).delete()
+    session.commit()
+    b.status = BusinessStatus.SITE_SCRAPED
+    session.commit()
+    ExtractSignalsStage().run(session, run_id=None)
+
+    after = session.query(Signals).filter_by(business_id=b.id).one()
+    assert after.missed_call_complaints_90d == 4
+    assert after.complaint_quotes == ["nobody answered"] * 4
+    assert after.review_velocity_90d is not None
+
+
+def test_a_never_enriched_business_keeps_review_signals_unknown(session):
+    """The other half: an unenriched business must leave the dormant review
+    rules skipped, not score them as zero complaints."""
+    from app.models.derived import Signals
+    from app.pipeline.extract_signals import ExtractSignalsStage
+
+    b = Business(cid="plain", name="plain", status=BusinessStatus.SITE_SCRAPED)
+    session.add(b); session.commit()
+    ExtractSignalsStage().run(session, run_id=None)
+
+    sig = session.query(Signals).filter_by(business_id=b.id).one()
+    assert sig.missed_call_complaints_90d is None
+    assert sig.review_velocity_90d is None

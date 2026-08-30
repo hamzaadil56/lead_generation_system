@@ -8,7 +8,7 @@ from app.clients.protocols import ReviewProvider, ReviewResult
 from app.clients.serpapi_reviews import collect_recent_reviews, parse_iso_date
 from app.domain.extractors.complaints import count_missed_call_complaints
 from app.models.business import Business, BusinessStatus
-from app.models.derived import Score, Review, Signals, ApiCall
+from app.models.derived import ApiCall, RawPayload, Review, Score, Signals
 from app.pipeline.base import StageReport
 
 log = structlog.get_logger()
@@ -30,10 +30,16 @@ class _CountingReviewProvider:
     def __init__(self, inner: ReviewProvider) -> None:
         self._inner = inner
         self.calls = 0
+        # Every page's untouched response, so the stage can write one
+        # RawPayload per real call. `reviews`/`signals` are declared
+        # rebuildable (ADR-003) and cannot be unless this is stored.
+        self.raw_pages: list[dict] = []
 
     def reviews(self, data_id: str, page_token: str | None = None) -> ReviewResult:
         self.calls += 1
-        return self._inner.reviews(data_id, page_token)
+        result = self._inner.reviews(data_id, page_token)
+        self.raw_pages.append(result.raw)
+        return result
 
 
 class FetchReviewsStage:
@@ -102,6 +108,15 @@ class FetchReviewsStage:
                                 endpoint="google_maps_reviews",
                                 credits=wrapper.calls, status_code=200,
                                 created_at=datetime.utcnow()))
+            # One permanent payload per real call (ADR-003). `derived.py`
+            # already lists `serpapi_reviews` as an expected source; nothing
+            # was ever writing it, so the documented "drop the derived
+            # tables and re-run" recovery destroyed the enrichment for good.
+            for page in wrapper.raw_pages:
+                session.add(RawPayload(business_id=business.id,
+                                       source="serpapi_reviews", url=None,
+                                       payload=page,
+                                       fetched_at=datetime.utcnow()))
 
             for r in reviews:
                 published_at = None
