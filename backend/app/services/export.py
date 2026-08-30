@@ -17,7 +17,7 @@ def export_leads(session: Session, quadrant: str | None, min_fit: int,
         q = q.filter(Score.quadrant == quadrant)
     rows = q.order_by((Score.fit_score * Score.pain_score).desc()).all()
 
-    with path.open("w", newline="") as fh:
+    with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=[
             "name", "phone", "website", "address", "segment", "review_count",
             "fit_score", "pain_score", "quadrant", "coverage", "top_reasons"])

@@ -1,0 +1,62 @@
+import csv
+from pathlib import Path
+
+from app.models.business import Business, BusinessStatus
+from app.models.derived import Score
+from app.services.export import export_leads
+
+
+def _scored_business(session, cid: str, name: str) -> Business:
+    b = Business(cid=cid, name=name, status=BusinessStatus.SCORED,
+                phone_is_valid=False)
+    session.add(b)
+    session.flush()
+    session.add(Score(business_id=b.id, ruleset_version="hvac_v1",
+                      fit_score=80, pain_score=80, quadrant="go_now",
+                      coverage=0.9, reasons=[]))
+    session.commit()
+    return b
+
+
+def test_export_round_trips_non_ascii_business_names(session, tmp_path):
+    """Finding 3: exporting a business whose name contains non-ASCII
+    characters must round-trip intact when the file is read back as
+    UTF-8."""
+    _scored_business(session, "c1", "Café HVAC & Muñoz A/C")
+
+    out = tmp_path / "leads.csv"
+    count = export_leads(session, quadrant=None, min_fit=0, path=out)
+    assert count == 1
+
+    rows = list(csv.DictReader(out.open(encoding="utf-8")))
+    assert rows[0]["name"] == "Café HVAC & Muñoz A/C"
+
+
+def test_export_opens_the_csv_with_explicit_utf8_encoding(session, tmp_path, monkeypatch):
+    """Pins the actual defect: `path.open("w", newline="")` with no
+    `encoding=` inherits the platform's locale encoding, which raises
+    UnicodeEncodeError mid-write on a non-UTF-8 locale (e.g. Windows).
+    Spies on Path.open to assert the export path always passes
+    encoding="utf-8" explicitly, regardless of host locale. Fails on the
+    unfixed code, whose call to path.open("w", newline="") carries no
+    encoding kwarg at all."""
+    _scored_business(session, "c1", "Café HVAC")
+    out = tmp_path / "leads.csv"
+
+    captured: dict[str, object] = {}
+    real_open = Path.open
+
+    def spy_open(self, *args, **kwargs):
+        if self == out:
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", spy_open)
+
+    export_leads(session, quadrant=None, min_fit=0, path=out)
+
+    assert captured.get("kwargs", {}).get("encoding") == "utf-8", (
+        "export_leads must open the CSV with an explicit encoding='utf-8', "
+        f"got args={captured.get('args')} kwargs={captured.get('kwargs')}"
+    )
