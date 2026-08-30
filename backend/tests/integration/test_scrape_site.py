@@ -164,3 +164,51 @@ def test_a_dead_target_site_logs_the_targets_status_code(session):
     call = session.query(ApiCall).filter_by(provider="firecrawl").one()
     assert call.status_code == 404
     assert call.credits == 1        # Firecrawl bills for the attempt
+
+
+def test_the_per_segment_cap_is_cumulative_across_runs(session):
+    """I6: `select` took up to `per_segment` from the businesses currently
+    in DISCOVERED. Scraped businesses leave that status, so the next
+    invocation took the NEXT `per_segment` — 20 discovered gave 15 scraped,
+    then 4 more on a re-run, and each `run-all` billed another batch.
+
+    The cap exists to hold a bounded stratified sample for testing the open
+    ICP hypothesis (ADR-022), so it must bound the sample: businesses in a
+    segment that are already past DISCOVERED count toward that segment's
+    cap."""
+    for i in range(20):
+        session.add(Business(cid=f"c{i}", name=f"c{i}", segment=Segment.GROWTH,
+                             website="https://example.com",
+                             status=BusinessStatus.DISCOVERED))
+    session.commit()
+
+    run1, run2, run3 = FakeWebScraper(), FakeWebScraper(), FakeWebScraper()
+    ScrapeSiteStage(run1, per_segment=15).run(session, run_id=None)
+    ScrapeSiteStage(run2, per_segment=15).run(session, run_id=None)
+    ScrapeSiteStage(run3, per_segment=15).run(session, run_id=None)
+
+    assert len(run1.calls) == 15
+    assert run2.calls == []          # was 4 — the next batch of leftovers
+    assert run3.calls == []
+
+
+def test_businesses_further_down_the_pipeline_still_count_toward_the_cap(session):
+    """The cap must see the whole sample, not just SITE_SCRAPED: a
+    business that has already been extracted, scored or failed consumed a
+    Firecrawl call too."""
+    for i, status in enumerate([BusinessStatus.SCORED,
+                                BusinessStatus.SIGNALS_EXTRACTED,
+                                BusinessStatus.FAILED]):
+        session.add(Business(cid=f"done{i}", name=f"done{i}",
+                             segment=Segment.GROWTH,
+                             website="https://example.com", status=status))
+    for i in range(5):
+        session.add(Business(cid=f"new{i}", name=f"new{i}",
+                             segment=Segment.GROWTH,
+                             website="https://example.com",
+                             status=BusinessStatus.DISCOVERED))
+    session.commit()
+
+    scraper = FakeWebScraper()
+    ScrapeSiteStage(scraper, per_segment=4).run(session, run_id=None)
+    assert len(scraper.calls) == 1     # 3 already counted against a cap of 4

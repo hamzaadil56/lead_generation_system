@@ -39,11 +39,29 @@ def test_full_pipeline_produces_scored_leads_and_a_csv(session, tmp_path):
 
 
 def test_pipeline_is_idempotent_when_rerun(session):
+    """I6. This test used to assert only cid uniqueness — which a UNIQUE
+    index guarantees anyway, so the assertion could not fail — while the
+    second iteration quietly made four more paid Firecrawl calls. It now
+    asserts what its name claims: a second run bills nothing new.
+
+    The per-segment cap bounds the SAMPLE (ADR-022's stratified
+    experiment), not the batch. Scraped businesses leave DISCOVERED, so
+    per-invocation semantics meant every `run-all` took the next
+    `per_segment` from the leftovers and Firecrawl spend was bounded only
+    by how many times anyone typed the command."""
+    scrapers = []
     for _ in range(2):
+        scraper = FakeWebScraper()
+        scrapers.append(scraper)
         DiscoverStage(FakeSearchProvider()).discover(session, None, PLAN)
-        ScrapeSiteStage(FakeWebScraper(), per_segment=5).run(session, None)
+        ScrapeSiteStage(scraper, per_segment=5).run(session, None)
         ExtractSignalsStage().run(session, None)
         ScoreStage(RULESET).run(session, None)
 
     cids = [b.cid for b in session.query(Business).all()]
     assert len(cids) == len(set(cids))
+
+    assert len(scrapers[0].calls) > 0
+    assert scrapers[1].calls == [], (
+        "re-running the pipeline re-billed Firecrawl for "
+        f"{len(scrapers[1].calls)} more scrapes")
