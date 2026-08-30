@@ -6,6 +6,7 @@ from app.domain.extractors.html import HTML_SIGNAL_KEYS, extract_html_signals
 from app.models.business import BusinessStatus
 from app.models.derived import ApiCall, RawPayload, Review, Signals
 from app.models.manual import ManualFacts
+from app.pipeline.fetch_reviews import SERPAPI_ENDPOINT
 from app.pipeline.base import Stage
 
 EXTRACTOR_VERSION = "1"
@@ -99,10 +100,17 @@ class ExtractSignalsStage(Stage):
         a Review row, so a business whose lookup legitimately returned zero
         recent reviews is still recorded as "enriched, zero complaints"
         rather than falling back to unknown.
+
+        The marker must be a SUCCESSFUL enrichment (`SERPAPI_ENDPOINT`).
+        A failed or partial one wrote the same marker, so this method
+        fabricated `complaints = 0` for a business whose lookup never
+        returned anything -- unknown scored as evidence, exactly what
+        finding 3 fixed at the HTML boundary (N2).
         """
         enriched = (session.query(ApiCall.id)
                     .filter(ApiCall.business_id == business.id,
-                            ApiCall.provider == "serpapi")
+                            ApiCall.provider == "serpapi",
+                            ApiCall.endpoint == SERPAPI_ENDPOINT)
                     .first())
         if enriched is None:
             # Never enriched: leave the review rules dormant (on_missing:

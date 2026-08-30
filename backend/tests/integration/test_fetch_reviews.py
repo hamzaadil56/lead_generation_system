@@ -327,3 +327,102 @@ def test_candidates_are_ranked_by_the_requested_ruleset_version(session):
         is BusinessStatus.SITE_SCRAPED
     assert session.query(Business).filter_by(cid="low_under_v1").one().status \
         is BusinessStatus.SCORED
+
+
+class _FailsOnFirstPage:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def reviews(self, data_id: str, page_token: str | None = None) -> ReviewResult:
+        from app.core.errors import TransientError
+        self.calls += 1
+        raise TransientError("serpapi: HTTP 500", status_code=500)
+
+
+def test_a_zero_credit_failure_does_not_mark_the_business_enriched(session):
+    """N2: a failure before any page completed still wrote the durable
+    `api_calls` marker. That marker is what `_review_signals` keys on, so
+    extract then fabricated `missed_call_complaints_90d = 0` for a business
+    nobody ever got reviews for -- the exact `on_missing: skip` violation
+    finding 3 fixed, arriving through a different door. And it was
+    permanent: the candidate guard keyed on the same marker."""
+    from app.models.derived import Signals
+    from app.pipeline.extract_signals import ExtractSignalsStage
+
+    b = _scored(session, "c1", fit=90)
+    provider = _FailsOnFirstPage()
+    FetchReviewsStage(provider, top_n=1).run(session, run_id=None)
+
+    assert provider.calls == 1
+    assert session.query(ApiCall).filter_by(
+        business_id=b.id, provider="serpapi").count() == 0
+
+    b.status = BusinessStatus.SITE_SCRAPED
+    session.commit()
+    ExtractSignalsStage().run(session, run_id=None)
+    sig = session.query(Signals).filter_by(business_id=b.id).one()
+    assert sig.missed_call_complaints_90d is None      # absent, not zero
+    assert sig.review_velocity_90d is None
+
+
+def test_a_failed_enrichment_does_not_inflate_coverage(session):
+    """The consequence the signal values only hint at: two dormant rules
+    become applicable and coverage climbs as if the business had really
+    been enriched."""
+    from pathlib import Path
+    from app.models.derived import Score
+    from app.pipeline.extract_signals import ExtractSignalsStage
+    from app.pipeline.score import ScoreStage
+    from app.services.rulesets import read_ruleset_file
+
+    ruleset = read_ruleset_file(Path("config/rulesets/hvac_v1.yaml"))
+    failed = _scored(session, "failed", fit=90)
+    untouched = _scored(session, "untouched", fit=10)
+
+    FetchReviewsStage(_FailsOnFirstPage(), top_n=1).run(session, run_id=None)
+
+    for b in (failed, untouched):
+        b.status = BusinessStatus.SITE_SCRAPED
+    session.commit()
+    ExtractSignalsStage().run(session, run_id=None)
+    ScoreStage(ruleset).run(session, run_id=None)
+
+    failed_score = session.query(Score).filter_by(business_id=failed.id).one()
+    never = session.query(Score).filter_by(business_id=untouched.id).one()
+    assert failed_score.coverage == never.coverage
+    assert "missed_call_complaints" not in {
+        r["rule"] for r in failed_score.reasons}
+
+
+def test_a_partial_failure_is_tagged_and_stays_re_enrichable(session):
+    """A failure that DID bill pages keeps its honest cost row (finding 6),
+    but tagged with a distinct endpoint so it is visibly not a successful
+    enrichment: it must not fabricate signals and must not permanently
+    block re-enrichment."""
+    from app.models.derived import RawPayload, Signals
+    from app.pipeline.extract_signals import ExtractSignalsStage
+    from app.pipeline.fetch_reviews import SERPAPI_ENDPOINT
+
+    b = _scored(session, "c1", fit=90)
+    FetchReviewsStage(_FailsOnThirdPage(), top_n=1).run(session, run_id=None)
+
+    call = session.query(ApiCall).filter_by(
+        business_id=b.id, provider="serpapi").one()
+    assert call.credits == 2
+    assert call.endpoint != SERPAPI_ENDPOINT
+    # The two pages that were paid for are still kept (ADR-003).
+    assert session.query(RawPayload).filter_by(
+        source="serpapi_reviews").count() == 2
+
+    b.status = BusinessStatus.SITE_SCRAPED
+    session.commit()
+    ExtractSignalsStage().run(session, run_id=None)
+    assert session.query(Signals).filter_by(
+        business_id=b.id).one().missed_call_complaints_90d is None
+
+    # And a later run may retry it rather than being locked out forever.
+    b.status = BusinessStatus.SCORED
+    session.commit()
+    retry = FakeReviewProvider([])
+    FetchReviewsStage(retry, top_n=1).run(session, run_id=None)
+    assert len(retry.calls) == 1

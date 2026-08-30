@@ -21,6 +21,17 @@ log = structlog.get_logger()
 # of how many pages a business's reviews happen to span.
 MAX_CALLS_PER_BUSINESS = 4
 
+# The `api_calls` endpoint that marks a business as genuinely enriched.
+# `_review_signals` and the candidate query both key on it, so a failed or
+# partial enrichment MUST NOT carry it: a zero-credit failure used to write
+# this exact marker, after which extract fabricated
+# missed_call_complaints_90d = 0 for a business nobody ever got reviews
+# for, inflating coverage and waking two rules that should have stayed
+# dormant -- the `on_missing: skip` violation of finding 3 arriving through
+# a different door (N2).
+SERPAPI_ENDPOINT = "google_maps_reviews"
+SERPAPI_FAILED_ENDPOINT = "google_maps_reviews:failed"
+
 
 class _CountingReviewProvider:
     """Wraps a real `ReviewProvider`, counting how many calls actually
@@ -94,7 +105,11 @@ class FetchReviewsStage:
                       .join(Score, Score.business_id == Business.id)
                       .outerjoin(serpapi_calls,
                                 and_(serpapi_calls.business_id == Business.id,
-                                     serpapi_calls.provider == "serpapi"))
+                                     serpapi_calls.provider == "serpapi",
+                                     # Only a SUCCESSFUL enrichment counts
+                                     # as already-enriched; a failed one
+                                     # must stay retryable (N2).
+                                     serpapi_calls.endpoint == SERPAPI_ENDPOINT))
                       # Without the ruleset_version filter a business
                       # scored under two versions appears TWICE in
                       # `candidates`, and the not-already-enriched guard is
@@ -130,18 +145,34 @@ class FetchReviewsStage:
                 reviews = []
             finally:
                 spent += wrapper.calls
-                session.add(ApiCall(
-                    run_id=run_id, business_id=business.id,
-                    provider="serpapi", endpoint="google_maps_reviews",
-                    credits=wrapper.calls,
-                    status_code=(failure.status_code if failure else 200),
-                    created_at=datetime.utcnow()))
+                # Gated on wrapper.calls: a failure before any page
+                # completed billed nothing, so there is nothing to record
+                # -- and writing a row anyway is what falsely marked the
+                # business enriched.
+                if wrapper.calls > 0:
+                    session.add(ApiCall(
+                        run_id=run_id, business_id=business.id,
+                        provider="serpapi",
+                        endpoint=(SERPAPI_ENDPOINT if failure is None
+                                  else SERPAPI_FAILED_ENDPOINT),
+                        credits=wrapper.calls,
+                        status_code=(failure.status_code if failure else 200),
+                        created_at=datetime.utcnow()))
                 session.commit()
 
             if failure is not None:
                 report.failed += 1
                 log.warning("fetch_reviews.business_failed", cid=business.cid,
                             error=str(failure))
+                # Keep the pages that were actually paid for (ADR-003):
+                # `collect_recent_reviews` raises, so the parsed reviews
+                # are lost, but the raw responses are not.
+                for page in wrapper.raw_pages:
+                    session.add(RawPayload(business_id=business.id,
+                                           source="serpapi_reviews", url=None,
+                                           payload=page,
+                                           fetched_at=datetime.utcnow()))
+                session.commit()
                 if isinstance(failure, RunPermanentError):
                     # A dead key fails identically for every remaining
                     # business; do not burn the whole candidate list on it.
@@ -149,9 +180,10 @@ class FetchReviewsStage:
                     report.reason = str(failure)
                     break
                 # The business keeps its SCORED status so a later run can
-                # retry it; only the ApiCall marker would block that, and
-                # a partial-credit row is the honest record of what was
-                # actually billed.
+                # retry it. The partial-credit row is the honest record of
+                # what was actually billed, and its distinct endpoint keeps
+                # it out of the already-enriched guard below -- a failure
+                # must not lock a business out of enrichment forever.
                 continue
             # One permanent payload per real call (ADR-003). `derived.py`
             # already lists `serpapi_reviews` as an expected source; nothing
