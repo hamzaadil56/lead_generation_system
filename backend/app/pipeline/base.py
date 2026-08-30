@@ -32,6 +32,11 @@ class Stage(ABC):
     name: str
     consumes: BusinessStatus
     produces: BusinessStatus
+    # Set by run() before the selection loop so process() implementations
+    # (which are not passed run_id — see scrape_site.py) can still stamp it
+    # on the ApiCall rows they write (Correction B / spend_usd under-report
+    # fix). Declared on the class body so subclasses and mypy both see it.
+    _run_id: int | None = None
 
     @abstractmethod
     def process(self, business: Business, session: Session) -> None: ...
@@ -47,6 +52,7 @@ class Stage(ABC):
         self.process(business, session)
 
     def run(self, session: Session, run_id: int | None, limit: int = 500) -> StageReport:
+        self._run_id = run_id
         report = StageReport()
         consecutive_fatal = 0
 

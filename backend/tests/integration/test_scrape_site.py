@@ -1,6 +1,9 @@
 from app.clients.fakes import FakeWebScraper
 from app.models.business import Business, BusinessStatus, Segment
+from app.models.derived import ApiCall
+from app.models.run import Run
 from app.pipeline.scrape_site import ScrapeSiteStage
+from app.services.budget import spend_usd
 
 
 def test_scrapes_up_to_n_per_segment_not_top_n_overall(session):
@@ -65,3 +68,28 @@ def test_dead_site_advances_with_website_status_dead_not_failed(session):
     b = session.query(Business).filter_by(cid="d1").one()
     assert b.status is BusinessStatus.SITE_SCRAPED
     assert b.failed_stage is None
+
+
+def test_api_calls_carry_the_run_id_so_spend_usd_sees_per_run_firecrawl_cost(session):
+    """Correction B: process() is never passed run_id, so scrape_site must
+    read it off self._run_id (set by Stage.run before the selection loop).
+    Without this, ApiCall rows for scrape_site are orphaned (run_id=None)
+    and a per-run spend_usd(session, run_id) query silently misses all
+    Firecrawl spend."""
+    run = Run(status="running", source="cli", search_plan={})
+    session.add(run)
+    session.commit()
+
+    session.add(Business(cid="r1", name="r1", segment=Segment.GROWTH,
+                         website="https://example.com",
+                         status=BusinessStatus.DISCOVERED))
+    session.commit()
+
+    ScrapeSiteStage(FakeWebScraper(), per_segment=5).run(session, run_id=run.id)
+
+    calls = session.query(ApiCall).filter_by(provider="firecrawl").all()
+    assert len(calls) > 0
+    assert all(c.run_id == run.id for c in calls)
+    assert spend_usd(session, run_id=run.id) > 0
+    # A different/absent run_id must see none of this spend.
+    assert spend_usd(session, run_id=run.id + 1) == 0.0

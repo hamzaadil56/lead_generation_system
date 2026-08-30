@@ -46,7 +46,8 @@ class ScrapeSiteStage(Stage):
                                payload=home.model_dump(),
                                raw_text=home.raw_html,
                                fetched_at=datetime.utcnow()))
-        session.add(ApiCall(business_id=business.id, provider="firecrawl",
+        session.add(ApiCall(run_id=self._run_id, business_id=business.id,
+                            provider="firecrawl",
                             endpoint="scrape", credits=1, status_code=200,
                             created_at=datetime.utcnow()))
 
@@ -65,6 +66,7 @@ class ScrapeSiteStage(Stage):
                                    url=url, payload=page.model_dump(),
                                    raw_text=page.raw_html,
                                    fetched_at=datetime.utcnow()))
-            session.add(ApiCall(business_id=business.id, provider="firecrawl",
+            session.add(ApiCall(run_id=self._run_id, business_id=business.id,
+                                provider="firecrawl",
                                 endpoint="scrape", credits=1, status_code=200,
                                 created_at=datetime.utcnow()))
