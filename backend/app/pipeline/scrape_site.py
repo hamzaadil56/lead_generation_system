@@ -20,24 +20,34 @@ class ScrapeSiteStage(Stage):
         self._per_segment = per_segment
 
     def select(self, session, run_id: int | None, limit: int) -> list[Business]:
+        # Ordered by discovery order (id), not review_count: ratingCount is
+        # a segment label only, never a filter (ADR-022). Sorting candidates
+        # by review_count before applying the per-segment cap would make it
+        # the deciding factor for which businesses in an oversubscribed
+        # segment ever get scraped — exactly the gate ADR-022 forbids.
         candidates = (session.query(Business)
                       .filter(Business.status == self.consumes,
                               Business.website.isnot(None))
-                      .order_by(Business.review_count.desc().nullslast())
+                      .order_by(Business.id)
                       .all())
         return stratify(candidates,
                         key=lambda b: str(b.segment) if b.segment else None,
                         per_group=self._per_segment)
 
     def process(self, business: Business, session) -> None:
-        home = self._scraper.scrape(business.website)
+        # select()'s Business.website.isnot(None) filter guarantees this at
+        # runtime, but mypy can't see through a SQL filter — narrow here.
+        assert business.website is not None
+        website = business.website
+
+        home = self._scraper.scrape(website)
         session.add(RawPayload(business_id=business.id, source="firecrawl",
-                               url=business.website,
+                               url=website,
                                payload=home.model_dump(),
                                raw_text=home.raw_html,
                                fetched_at=datetime.utcnow()))
-        session.add(ApiCall(provider="firecrawl", endpoint="scrape",
-                            credits=1, status_code=200,
+        session.add(ApiCall(business_id=business.id, provider="firecrawl",
+                            endpoint="scrape", credits=1, status_code=200,
                             created_at=datetime.utcnow()))
 
         if home.status != "ok":
@@ -55,6 +65,6 @@ class ScrapeSiteStage(Stage):
                                    url=url, payload=page.model_dump(),
                                    raw_text=page.raw_html,
                                    fetched_at=datetime.utcnow()))
-            session.add(ApiCall(provider="firecrawl", endpoint="scrape",
-                                credits=1, status_code=200,
+            session.add(ApiCall(business_id=business.id, provider="firecrawl",
+                                endpoint="scrape", credits=1, status_code=200,
                                 created_at=datetime.utcnow()))
