@@ -1,3 +1,4 @@
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -128,7 +129,24 @@ def run_all(vertical: str, state: str | None = None, location: str | None = None
                 run_row.finished_at = datetime.utcnow()
                 s.commit()
                 raise typer.Exit(code=1) from exc
-        run_stage()
+
+        try:
+            run_stage()
+        except Exception:
+            # Any non-budget failure (a real provider error, a bug in a
+            # stage, etc.) must still move the Run to a terminal state --
+            # otherwise it is stranded at status="running" forever with no
+            # finished_at. Unlike the budget-abort path above, this does
+            # NOT convert to a clean typer.Exit: the original exception is
+            # re-raised so it stays visible (traceback and all) rather than
+            # being swallowed into a quiet non-zero exit.
+            with get_session() as s:
+                run_row = s.query(Run).filter_by(id=run_id).one()
+                run_row.status = "failed"
+                run_row.error = f"{stage_name} failed: {traceback.format_exc()[-2000:]}"
+                run_row.finished_at = datetime.utcnow()
+                s.commit()
+            raise
 
     with get_session() as s:
         run_row = s.query(Run).filter_by(id=run_id).one()

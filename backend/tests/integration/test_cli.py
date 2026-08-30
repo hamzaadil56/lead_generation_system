@@ -153,3 +153,36 @@ def test_run_all_second_scoring_pass_reflects_review_enrichment(cli_env):
     reasons_by_rule = {r["rule"]: r for r in score.reasons}
     assert "missed_call_complaints" in reasons_by_rule
     assert reasons_by_rule["missed_call_complaints"]["matched"] is True
+
+
+class _BoomSearchProvider:
+    """Simulates a real provider error propagating unwrapped, exactly like
+    `DiscoverStage.discover`'s `self._provider.search()` call at
+    backend/app/pipeline/discover.py:32, which has no try/except around
+    it. Used to prove run-all's non-budget exception path (round 2 fix)."""
+
+    def search(self, query: str, page: int = 1):
+        raise RuntimeError("boom: provider exploded")
+
+
+def test_run_all_reaches_a_terminal_state_when_a_stage_raises_a_non_budget_error(
+        cli_env, monkeypatch):
+    """Round 2 finding: only BudgetExceeded was caught in run-all, so any
+    other exception (e.g. a real provider error) left the Run row stuck at
+    status="running" forever, with no finished_at. The fix must reach a
+    terminal Run state on every exit path AND let the original exception
+    keep surfacing -- a crashed run must still look crashed, not exit
+    clean."""
+    monkeypatch.setattr(cli, "SerperClient", lambda: _BoomSearchProvider())
+
+    result = _invoke_run_all()
+
+    assert result.exit_code != 0
+    assert result.exception is not None
+    assert isinstance(result.exception, RuntimeError)
+    assert "boom" in str(result.exception)
+
+    run = cli_env.query(Run).one()
+    assert run.status in ("failed", "complete")  # terminal, never "running"
+    assert run.status != "running"
+    assert run.finished_at is not None
