@@ -1,8 +1,8 @@
 from datetime import datetime, timedelta, UTC
-from app.clients.protocols import ReviewRecord
+from app.clients.protocols import ReviewRecord, ReviewResult
 from app.clients.fakes import FakeReviewProvider
 from app.models.business import Business, BusinessStatus, Segment
-from app.models.derived import Score, Review
+from app.models.derived import ApiCall, Score, Review
 from app.pipeline.fetch_reviews import FetchReviewsStage
 
 
@@ -19,6 +19,23 @@ def _scored(session, cid: str, fit: int) -> Business:
                       coverage=0.6, reasons=[]))
     session.commit()
     return b
+
+
+class PagedReviewProvider:
+    """A `ReviewProvider` that serves multiple pages, so
+    `collect_recent_reviews` makes more than one real call for a single
+    business — unlike `FakeReviewProvider`, which never paginates."""
+
+    def __init__(self, pages: list[list[ReviewRecord]]) -> None:
+        self.pages = pages
+        self.calls: list[str] = []
+
+    def reviews(self, data_id: str, page_token: str | None = None) -> ReviewResult:
+        idx = len(self.calls)
+        self.calls.append(data_id)
+        has_next = idx + 1 < len(self.pages)
+        return ReviewResult(reviews=self.pages[idx],
+                            next_page_token="tok" if has_next else None, raw={})
 
 
 def test_enriches_only_the_top_n_by_fit_score(session):
@@ -48,6 +65,9 @@ def test_does_not_re_enrich_a_business_that_already_has_reviews(session):
     b = _scored(session, "c1", fit=90)
     session.add(Review(business_id=b.id, rating=5, published_at=datetime.now(UTC),
                        text="ok", source="serpapi"))
+    session.add(ApiCall(business_id=b.id, provider="serpapi",
+                        endpoint="google_maps_reviews", credits=1,
+                        status_code=200, created_at=datetime.utcnow()))
     session.commit()
 
     provider = FakeReviewProvider([])
@@ -55,13 +75,99 @@ def test_does_not_re_enrich_a_business_that_already_has_reviews(session):
     assert provider.calls == []
 
 
+def test_zero_review_business_is_not_reselected_on_a_second_run(session):
+    """Finding 2: a business whose SerpApi lookup legitimately returns zero
+    recent reviews never gets a `Review` row. It must still be marked
+    enriched (via the durable `api_calls` row) so it is not re-billed
+    forever once it loops back through extract_signals/score to SCORED."""
+    b = _scored(session, "c1", fit=90)
+    provider = FakeReviewProvider([])  # always returns zero reviews
+
+    FetchReviewsStage(provider, top_n=5).run(session, run_id=None)
+    assert len(provider.calls) == 1
+    assert session.query(Business).filter_by(cid="c1").one().status \
+        is BusinessStatus.SITE_SCRAPED
+
+    # Simulate the natural loop: extract_signals + score run again over the
+    # (still reviewless) business and re-produce SCORED.
+    b.status = BusinessStatus.SCORED
+    session.commit()
+
+    FetchReviewsStage(provider, top_n=5).run(session, run_id=None)
+    assert len(provider.calls) == 1      # not called again — no re-billing
+
+
+def test_ceiling_counts_credits_not_rows(session):
+    """Finding 1: two prior `api_calls` rows already logged 4 credits each
+    (8 total, but only 2 rows). A ceiling that counted rows instead of
+    summing credits would see spend of 2 and let a new business through;
+    summing credits correctly sees spend of 8 and must reserve the
+    worst-case 4 more, which trips a ceiling of 10."""
+    b = _scored(session, "already", fit=50)
+    session.add(ApiCall(business_id=b.id, provider="serpapi",
+                        endpoint="google_maps_reviews", credits=4,
+                        status_code=200, created_at=datetime.utcnow()))
+    session.add(ApiCall(business_id=b.id, provider="serpapi",
+                        endpoint="google_maps_reviews", credits=4,
+                        status_code=200, created_at=datetime.utcnow()))
+    session.commit()
+    b.status = BusinessStatus.SCORED   # keep it out of "already enriched"
+    session.commit()                   # so it would be eligible if not for spend
+
+    candidate = _scored(session, "new", fit=90)
+    provider = FakeReviewProvider([])
+    report = FetchReviewsStage(provider, top_n=5,
+                               monthly_ceiling=10).run(session, run_id=None)
+
+    assert provider.calls == []
+    assert report.reason is not None
+
+
+def test_logged_credits_equal_actual_number_of_provider_calls(session):
+    """Finding 3: the logged `credits` must equal the real number of
+    provider calls `collect_recent_reviews` made, not a hardcoded guess —
+    checked for both a multi-page and a single-page business."""
+    recent = _recent(5)
+
+    b_multi = _scored(session, "multi", fit=90)
+    multi_provider = PagedReviewProvider([
+        [ReviewRecord(iso_date=recent, snippet="a")],
+        [ReviewRecord(iso_date=recent, snippet="b")],
+        [ReviewRecord(iso_date=recent, snippet="c")],
+    ])
+    FetchReviewsStage(multi_provider, top_n=5).run(session, run_id=None)
+    assert len(multi_provider.calls) == 3
+    multi_call = session.query(ApiCall).filter_by(
+        business_id=b_multi.id, provider="serpapi").one()
+    assert multi_call.credits == 3
+
+    b_single = _scored(session, "single", fit=90)
+    single_provider = PagedReviewProvider([
+        [ReviewRecord(iso_date=recent, snippet="a")],
+    ])
+    FetchReviewsStage(single_provider, top_n=5).run(session, run_id=None)
+    assert len(single_provider.calls) == 1
+    single_call = session.query(ApiCall).filter_by(
+        business_id=b_single.id, provider="serpapi").one()
+    assert single_call.credits == 1
+
+
 def test_monthly_ceiling_stops_the_stage(session):
     """The free tier resets monthly and does not roll over; exceeding it
-    silently degrades later runs to basic tier (ADR-020)."""
+    silently degrades later runs to basic tier (ADR-020).
+
+    With monthly_ceiling=4 and the worst-case reservation of
+    MAX_CALLS_PER_BUSINESS=4: the first business is let through (0 + 4 is
+    not > 4), costs 1 real credit (FakeReviewProvider never paginates), so
+    spent becomes 1; the second business trips the check (1 + 4 > 4) and
+    the stage stops. Exactly 1 business is processed, exactly 1 real call
+    is made — pinned exactly, not just bounded, so a regression in the
+    reservation arithmetic fails this test."""
     for i in range(5):
         _scored(session, f"c{i}", fit=i * 10)
     provider = FakeReviewProvider([])
     report = FetchReviewsStage(provider, top_n=5,
                                monthly_ceiling=4).run(session, run_id=None)
-    assert len(provider.calls) <= 2      # 2 calls/business against a 4 ceiling
+    assert len(provider.calls) == 1
+    assert report.processed == 1
     assert report.reason is not None

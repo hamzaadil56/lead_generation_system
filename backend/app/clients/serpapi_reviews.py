@@ -36,7 +36,7 @@ class SerpApiReviewProvider:
         )
 
 
-def _parse_iso_date(iso_date: str) -> datetime | None:
+def parse_iso_date(iso_date: str) -> datetime | None:
     """Parse a review's iso_date into an aware UTC datetime.
 
     SerpApi's exact date format has never been observed in production, so
@@ -70,7 +70,7 @@ def collect_recent_reviews(provider: ReviewProvider, data_id: str,
         for r in result.reviews:
             if not r.iso_date:
                 continue
-            parsed = _parse_iso_date(r.iso_date)
+            parsed = parse_iso_date(r.iso_date)
             if parsed is not None and parsed >= cutoff:
                 recent.append(r)
         collected.extend(recent)
