@@ -62,7 +62,34 @@ def test_html_catches_software_that_booking_links_missed():
     assert extract_html_signals(html, None)["software_from_html"] == "servicetitan"
 
 
-def test_no_html_returns_all_false_not_a_crash():
+def test_no_html_returns_the_keys_ABSENT_not_false():
+    """C3. This test previously asserted the defect as correct:
+
+        assert s["has_chat_widget"] is False
+        assert s["runs_google_ads"] is False
+
+    Those were coerced booleans over an empty string, not findings. The
+    engine treats a present `False` as evidence, so a dead-site business
+    matched `no_chat_widget` for +20 pain points on nothing and kept
+    `runs_google_ads` in the fit denominator. `on_missing: skip` can only
+    work if an unevaluated signal is ABSENT.
+    """
     s = extract_html_signals(None, None)
+    assert s == {}
+    for key in ("has_chat_widget", "runs_google_ads", "has_contact_form",
+                "claims_24_7", "software_from_html", "chat_vendor",
+                "has_meta_pixel"):
+        assert key not in s
+
+
+def test_a_signal_evaluated_against_real_html_and_not_found_stays_false():
+    """The other half of the distinction: absence of evidence in HTML we
+    DID read is a finding, and must not regress to 'unknown'."""
+    s = extract_html_signals(_load("royalair"), None)
     assert s["has_chat_widget"] is False
-    assert s["runs_google_ads"] is False
+    assert "has_chat_widget" in s
+
+
+def test_markdown_only_input_knows_claims_24_7_and_nothing_else():
+    s = extract_html_signals(None, "We are open 24/7 for emergencies")
+    assert s == {"claims_24_7": True}

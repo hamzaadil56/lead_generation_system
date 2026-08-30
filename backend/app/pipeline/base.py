@@ -85,6 +85,11 @@ class Stage(ABC):
                     business.status = self.produces      # data, not failure
                 session.commit()
                 report.processed += 1
+                # This business was handled successfully (as data), so it
+                # must not count toward the run-level circuit breaker --
+                # otherwise five dead domains in a row would abort a run
+                # that is working exactly as designed.
+                consecutive_fatal = 0
 
             except Exception as exc:
                 business.status = BusinessStatus.FAILED

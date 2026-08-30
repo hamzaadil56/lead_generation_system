@@ -1,3 +1,5 @@
+import pytest
+
 from app.clients.fakes import FakeSearchProvider
 from app.pipeline.discover import DiscoverStage
 from app.services.search_plan import SearchPlan
@@ -56,3 +58,45 @@ def test_raw_payload_and_actual_credits_are_recorded(session):
     assert session.query(RawPayload).count() >= 20      # ADR-003
     call = session.query(ApiCall).filter_by(provider="serper").first()
     assert call.credits == 3                            # self-reported (ADR-021)
+
+
+class _RateLimitedProvider:
+    """Raises what SerperClient now raises for an HTTP 429."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def search(self, query: str, page: int = 1):
+        from app.core.errors import TransientError
+        self.calls += 1
+        raise TransientError("serper: HTTP 429", status_code=429)
+
+
+class _DeadKeyProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def search(self, query: str, page: int = 1):
+        from app.core.errors import RunPermanentError
+        self.calls += 1
+        raise RunPermanentError("serper: HTTP 401", status_code=401)
+
+
+def test_a_serper_429_is_retried_three_times_not_once(session):
+    """C2: the spec mandates 3 attempts with backoff. Before the clients
+    spoke the taxonomy, a 429 arrived as a raw httpx.HTTPStatusError,
+    tenacity did not match it, DiscoverStage had no try/except, and the
+    run died after exactly ONE provider call."""
+    from app.core.errors import TransientError
+    provider = _RateLimitedProvider()
+    with pytest.raises(TransientError):
+        DiscoverStage(provider).discover(session, run_id=None, plan=PLAN)
+    assert provider.calls == 3
+
+
+def test_a_dead_serper_key_aborts_discovery_instead_of_reporting_success(session):
+    provider = _DeadKeyProvider()
+    report = DiscoverStage(provider).discover(session, run_id=None, plan=PLAN)
+    assert report.aborted is True
+    assert report.reason is not None
+    assert provider.calls == 1          # not retried — it will never succeed

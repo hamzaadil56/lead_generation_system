@@ -1,4 +1,6 @@
 import httpx
+
+from app.clients.http_errors import translate_httpx_error
 from app.clients.protocols import PlaceRecord, SearchResult
 from app.core.config import get_settings
 
@@ -29,11 +31,18 @@ class SerperClient:
         self._client = client or httpx.Client(timeout=30.0)
 
     def search(self, query: str, page: int = 1) -> SearchResult:
-        resp = self._client.post(
-            ENDPOINT,
-            headers={"X-API-KEY": self._settings.serper_key,
-                     "Content-Type": "application/json"},
-            json={"q": query, "gl": "us", "hl": "en", "page": page},
-        )
-        resp.raise_for_status()
+        # Every failure leaves here as a taxonomy class. Previously a 429
+        # propagated as a raw httpx.HTTPStatusError, which tenacity does not
+        # retry and DiscoverStage does not catch, so one rate limit killed
+        # the run after a single attempt where the spec mandates three (C2).
+        try:
+            resp = self._client.post(
+                ENDPOINT,
+                headers={"X-API-KEY": self._settings.serper_key,
+                         "Content-Type": "application/json"},
+                json={"q": query, "gl": "us", "hl": "en", "page": page},
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            translate_httpx_error(exc, "serper")
         return parse_search_response(resp.json())

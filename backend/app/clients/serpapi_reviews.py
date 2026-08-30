@@ -1,7 +1,17 @@
 from datetime import datetime, timedelta, UTC
+
 import serpapi
+from serpapi.exceptions import (
+    APIKeyNotProvided,
+    HTTPConnectionError,
+    HTTPError,
+    SerpApiError,
+)
+
+from app.clients.http_errors import raise_for_status_code
 from app.clients.protocols import ReviewProvider, ReviewRecord, ReviewResult
 from app.core.config import get_settings
+from app.core.errors import RunPermanentError, TransientError
 
 
 class SerpApiReviewProvider:
@@ -20,7 +30,21 @@ class SerpApiReviewProvider:
         }
         if page_token:
             params["next_page_token"] = page_token
-        raw = serpapi.search(**params).as_dict()
+        # HTTPConnectionError is checked first: it subclasses HTTPError but
+        # carries status_code = -1, which would otherwise classify as a
+        # per-business permanent failure instead of a retryable one.
+        try:
+            raw = serpapi.search(**params).as_dict()
+        except HTTPConnectionError as exc:
+            raise TransientError(f"serpapi: {exc!r}") from exc
+        except HTTPError as exc:
+            raise_for_status_code(getattr(exc, "status_code", None),
+                                  "serpapi", str(exc))
+        except APIKeyNotProvided as exc:
+            raise RunPermanentError(f"serpapi: {exc!r}") from exc
+        except SerpApiError as exc:
+            # Everything else the SDK defines is a transport/timeout flavour.
+            raise TransientError(f"serpapi: {exc!r}") from exc
 
         return ReviewResult(
             reviews=[

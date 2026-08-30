@@ -93,3 +93,39 @@ def test_api_calls_carry_the_run_id_so_spend_usd_sees_per_run_firecrawl_cost(ses
     assert spend_usd(session, run_id=run.id) > 0
     # A different/absent run_id must see none of this spend.
     assert spend_usd(session, run_id=run.id + 1) == 0.0
+
+
+class _OutOfCreditsScraper:
+    """What FirecrawlScraper now raises for an HTTP 402. Previously the
+    adapter's bare `except Exception` turned this into
+    ScrapeResult(status="dead") for every remaining business."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def scrape(self, url):
+        from app.core.errors import RunPermanentError
+        self.calls += 1
+        raise RunPermanentError("firecrawl: HTTP 402", status_code=402)
+
+
+def test_firecrawl_running_out_of_credits_trips_the_circuit_breaker(session):
+    """C1+C2+I3. Ten businesses, an expired/exhausted key. The breaker must
+    stop after 5, no business may be advanced, and no fabricated dead-site
+    RawPayload may be written -- `raw_payloads` is append-only (ADR-003),
+    so a poisoned row there is unrecoverable through the CLI."""
+    from app.models.derived import RawPayload
+    for i in range(10):
+        session.add(Business(cid=f"x{i}", name=f"x{i}", segment=Segment.GROWTH,
+                             website="https://example.com",
+                             status=BusinessStatus.DISCOVERED))
+    session.commit()
+
+    scraper = _OutOfCreditsScraper()
+    report = ScrapeSiteStage(scraper, per_segment=10).run(session, run_id=None)
+
+    assert report.aborted is True
+    assert scraper.calls == 5                      # breaker threshold, not 10
+    assert session.query(Business).filter_by(
+        status=BusinessStatus.SITE_SCRAPED).count() == 0
+    assert session.query(RawPayload).filter_by(source="firecrawl").count() == 0

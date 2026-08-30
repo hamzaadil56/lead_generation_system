@@ -35,20 +35,49 @@ _FORM = re.compile(r"<form[^>]*>.*?<input[^>]+type=[\"'](?:email|tel)[\"']",
 _24_7 = re.compile(r"24[\s/\-]?7|24 hours a day|around the clock", re.IGNORECASE)
 
 
+# Every key this extractor can produce. `extract_signals` uses it to blank
+# the columns for signals that were NOT evaluated on this pass, so a
+# rebuild can never leave a stale True behind.
+HTML_SIGNAL_KEYS: tuple[str, ...] = (
+    "has_chat_widget", "chat_vendor", "software_from_html",
+    "has_contact_form", "runs_google_ads", "has_meta_pixel", "claims_24_7",
+)
+
+
 def extract_html_signals(raw_html: str | None,
                          markdown: str | None) -> dict[str, Any]:
-    html = (raw_html or "").lower()
-    text = markdown or ""
+    """Return ONLY the signals this input actually provides evidence for.
 
-    chat_vendor = next((v for needle, v in CHAT_FINGERPRINTS if needle in html), None)
-    software = next((v for needle, v in SOFTWARE_FINGERPRINTS if needle in html), None)
+    A key that was evaluated against real HTML and found absent is `False`
+    — a finding. A key with no HTML to evaluate is OMITTED — unknown.
+    Coercing the latter to `False` (which is what `(raw_html or "")` used
+    to do) breaks `on_missing: skip` at the extractor boundary: a dead-site
+    business matched the `no_chat_widget` pain rule for +20 points on zero
+    evidence, carried `runs_google_ads` in the fit denominator, and scored
+    the same coverage as a fully scraped business. That falsifies ADR-014
+    ("a dead website means zero applicable pain rules") and ADR-020
+    ("coverage is what distinguishes the tiers").
+    """
+    signals: dict[str, Any] = {}
 
-    return {
-        "has_chat_widget": chat_vendor is not None,
-        "chat_vendor": chat_vendor,
-        "software_from_html": software,
-        "has_contact_form": bool(_FORM.search(raw_html or "")),
-        "runs_google_ads": bool(_ADS.search(raw_html or "")),
-        "has_meta_pixel": bool(_PIXEL.search(raw_html or "")),
-        "claims_24_7": bool(_24_7.search(text)),
-    }
+    if raw_html is not None:
+        html = raw_html.lower()
+        chat_vendor = next(
+            (v for needle, v in CHAT_FINGERPRINTS if needle in html), None)
+        software = next(
+            (v for needle, v in SOFTWARE_FINGERPRINTS if needle in html), None)
+        signals.update({
+            "has_chat_widget": chat_vendor is not None,
+            "chat_vendor": chat_vendor,
+            "software_from_html": software,
+            "has_contact_form": bool(_FORM.search(raw_html)),
+            "runs_google_ads": bool(_ADS.search(raw_html)),
+            "has_meta_pixel": bool(_PIXEL.search(raw_html)),
+        })
+
+    # claims_24_7 reads the markdown rendering, not the HTML, so it is
+    # known/unknown independently of the other six.
+    if markdown is not None:
+        signals["claims_24_7"] = bool(_24_7.search(markdown))
+
+    return signals

@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from app.domain.extractors.serper import extract_serper_signals
-from app.domain.extractors.html import extract_html_signals
+from app.domain.extractors.html import HTML_SIGNAL_KEYS, extract_html_signals
 from app.models.business import BusinessStatus
 from app.models.derived import Signals, RawPayload
 from app.models.manual import ManualFacts
@@ -25,8 +25,15 @@ class ExtractSignalsStage(Stage):
                   .filter_by(business_id=business.id, source="firecrawl")
                   .order_by(RawPayload.fetched_at.desc()).first())
         payload = scrape.payload if scrape else {}
-        values.update(extract_html_signals(payload.get("raw_html"),
-                                           payload.get("markdown")))
+        html_values = extract_html_signals(payload.get("raw_html"),
+                                           payload.get("markdown"))
+        # A signal the extractor did not evaluate is written as NULL, not
+        # False: score.py drops NULL columns, so the rules that read it are
+        # skipped and their points leave the denominator (on_missing: skip).
+        # Writing every key explicitly also means a rebuild over a site that
+        # has since gone dead cannot leave a stale True behind.
+        for key in HTML_SIGNAL_KEYS:
+            values[key] = html_values.get(key)
         values["website_status"] = payload.get("status", "none")
 
         # Manual facts overlay LAST — they always win (ADR-008).

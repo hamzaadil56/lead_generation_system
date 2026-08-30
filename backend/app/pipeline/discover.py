@@ -2,8 +2,15 @@ from datetime import datetime
 
 import structlog
 from sqlalchemy.orm import Session
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from app.clients.protocols import SearchProvider, PlaceRecord
+from app.core.errors import BusinessPermanentError, RunPermanentError, TransientError
 from app.domain.segments import segment_for
 from app.domain.phone import validate_phone
 from app.models.business import Business, BusinessStatus
@@ -24,13 +31,40 @@ class DiscoverStage:
     def __init__(self, provider: SearchProvider) -> None:
         self._provider = provider
 
+    # DiscoverStage is not a `Stage`, so it inherits none of base.py's
+    # protections and must carry its own. Same policy as
+    # `Stage._process_with_retry`: 3 attempts with backoff on a
+    # TransientError, which is what a Serper 429 or 5xx now raises. Before
+    # the clients spoke the taxonomy, a 429 arrived as a raw
+    # httpx.HTTPStatusError and killed the run after ONE attempt (C2).
+    @retry(retry=retry_if_exception_type(TransientError),
+           stop=stop_after_attempt(3),
+           wait=wait_exponential(multiplier=1, min=1, max=16), reraise=True)
+    def _search(self, query: str, page: int):
+        return self._provider.search(query, page=page)
+
     def discover(self, session: Session, run_id: int | None,
                  plan: SearchPlan) -> StageReport:
         report = StageReport()
 
         for query in plan.queries:
             for page in range(1, plan.pages_per_query + 1):
-                result = self._provider.search(query, page=page)
+                try:
+                    result = self._search(query, page)
+                except RunPermanentError as exc:
+                    # Bad key / out of credits: every remaining query would
+                    # fail the same way. Stop and say so rather than
+                    # reporting a short run as a successful one.
+                    report.aborted = True
+                    report.reason = str(exc)
+                    log.error("discover.aborted", reason=str(exc))
+                    session.commit()
+                    return report
+                except BusinessPermanentError as exc:
+                    log.warning("discover.query_failed", term=query,
+                                page=page, error=str(exc))
+                    report.failed += 1
+                    break
 
                 session.add(ApiCall(run_id=run_id, provider="serper",
                                     endpoint="maps", credits=result.credits,

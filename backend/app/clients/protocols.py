@@ -33,6 +33,10 @@ class ScrapeResult(BaseModel):
     raw_html: str | None = None
     links: list[str] = []
     status: str            # "ok" | "dead" | "parked"
+    # The TARGET site's HTTP status, when the provider reported one. Used by
+    # scrape_site so the `api_calls` row records what actually happened
+    # instead of an unconditional 200.
+    status_code: int | None = None
     raw: dict
 
 
