@@ -20,3 +20,26 @@ dev = ["pytest>=8.0", "pytest-cov", "mypy>=1.9", "import-linter>=2.0", "ruff>=0.
 testpaths = ["tests"]
 markers = ["live: hits real APIs; excluded from CI"]
 addopts = "-m 'not live'"
+
+# mypy is a stated global constraint ("`mypy app` must be clean"), and all
+# six errors it reported were noise, not type defects: three missing
+# third-party stubs and three instances of the well-known pydantic-settings
+# false positive. Config only — no working code was changed to satisfy it.
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+# None of these ship type information (no py.typed, no stub package
+# installed). Only their imports are silenced; our own use of them is
+# still checked as `Any`.
+module = ["yaml", "yaml.*", "serpapi", "serpapi.*", "firecrawl", "firecrawl.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# `Settings()` reads every required field from the environment/.env, which
+# is the entire point of pydantic-settings, but mypy sees a dataclass-like
+# __init__ and demands database_url/serper_key/firecrawl_key as arguments.
+# Passing them would break the config; the error is the false positive.
+module = "app.core.config"
+disable_error_code = ["call-arg"]

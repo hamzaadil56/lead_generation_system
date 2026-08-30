@@ -117,12 +117,14 @@ def score(vertical: str = "hvac", run_id: int | None = None) -> None:
 
 
 @app.command()
-def enrich(top_n: int | None = None, run_id: int | None = None) -> None:
+def enrich(vertical: str = "hvac", top_n: int | None = None,
+           run_id: int | None = None) -> None:
     settings = get_settings()
     with get_session() as s:
         _report(FetchReviewsStage(
             SerpApiReviewProvider(), top_n=top_n or settings.enrichment_top_n,
-            monthly_ceiling=settings.serpapi_monthly_ceiling).run(s, run_id))
+            monthly_ceiling=settings.serpapi_monthly_ceiling,
+            ruleset_version=_ruleset(vertical).version).run(s, run_id))
 
 
 @app.command("run-all")
@@ -163,7 +165,7 @@ def run_all(vertical: str, state: str | None = None, location: str | None = None
         ("scrape", lambda: scrape(run_id=run_id, max_cost=max_cost)),
         ("extract", lambda: extract(run_id=run_id)),
         ("score", lambda: score(vertical, run_id=run_id)),
-        ("enrich", lambda: enrich(run_id=run_id)),
+        ("enrich", lambda: enrich(vertical, run_id=run_id)),
         # The ADR-020 loop: re-derive signals and re-score over the richer,
         # review-enriched data that `enrich` just fetched.
         ("extract", lambda: extract(run_id=run_id)),
@@ -212,9 +214,14 @@ def run_all(vertical: str, state: str | None = None, location: str | None = None
 
 @app.command("export")
 def export_cmd(out: Path = Path("leads.csv"), quadrant: str | None = None,
-               min_fit: int = 0) -> None:
+               min_fit: int = 0, vertical: str = "hvac") -> None:
+    # `ruleset_version` was hardcoded to "hvac_v1" inside export_leads and
+    # never threaded from here, so a second vertical exported 0 rows -- a
+    # failure that reads as "no leads matched" rather than as a bug.
+    version = _ruleset(vertical).version
     with get_session() as s:
-        typer.echo(f"exported {export_leads(s, quadrant, min_fit, out)} -> {out}")
+        count = export_leads(s, quadrant, min_fit, out, ruleset_version=version)
+        typer.echo(f"exported {count} ({version}) -> {out}")
 
 
 @app.command()

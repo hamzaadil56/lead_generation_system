@@ -55,10 +55,12 @@ class FetchReviewsStage:
     name = "fetch_reviews"
 
     def __init__(self, provider: ReviewProvider, top_n: int = 25,
-                 monthly_ceiling: int = 250) -> None:
+                 monthly_ceiling: int = 250,
+                 ruleset_version: str = "hvac_v1") -> None:
         self._provider = provider
         self._top_n = top_n
         self._ceiling = monthly_ceiling
+        self._ruleset_version = ruleset_version
 
     def _spent_this_month(self, session) -> int:
         # Naive on purpose: ApiCall.created_at is stored naive throughout
@@ -93,7 +95,13 @@ class FetchReviewsStage:
                       .outerjoin(serpapi_calls,
                                 and_(serpapi_calls.business_id == Business.id,
                                      serpapi_calls.provider == "serpapi"))
+                      # Without the ruleset_version filter a business
+                      # scored under two versions appears TWICE in
+                      # `candidates`, and the not-already-enriched guard is
+                      # evaluated once at query time -- so it is enriched
+                      # and billed twice in a single pass.
                       .filter(Business.status == BusinessStatus.SCORED,
+                              Score.ruleset_version == self._ruleset_version,
                               serpapi_calls.id.is_(None))
                       .order_by(Score.fit_score.desc())
                       .limit(self._top_n).all())

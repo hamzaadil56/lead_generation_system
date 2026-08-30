@@ -30,9 +30,33 @@ def test_prefilter_is_only_has_a_website(session):
     assert heights.status is BusinessStatus.DISCOVERED
     assert heights.segment is Segment.EMERGING
 
+    # This used to be `assert all(b.website is None for b in filtered)`
+    # over an EMPTY list: all 20 fixture records have a website, so
+    # FILTERED_OUT was never populated and the assertion passed for the
+    # wrong reason. It is the only guard on ADR-022's negative branch, so
+    # drive the branch with a record that actually lacks a website.
+    from app.clients.protocols import PlaceRecord
+    from app.pipeline.base import StageReport
+
+    stage = DiscoverStage(FakeSearchProvider())
+    stage._upsert(session, None, PlaceRecord(
+        cid="no-website-1", title="No Website HVAC", rating_count=4000,
+        phone_number="+18325551234", website=None, raw={}),
+        "hvac", StageReport())
+    stage._upsert(session, None, PlaceRecord(
+        cid="has-website-1", title="Has Website HVAC", rating_count=4,
+        website="https://example.com", raw={}),
+        "hvac", StageReport())
+    session.commit()
+
     filtered = session.query(Business).filter_by(
         status=BusinessStatus.FILTERED_OUT).all()
+    assert [b.cid for b in filtered] == ["no-website-1"]
     assert all(b.website is None for b in filtered)
+    # 4,000 reviews did not save it, and 4 reviews did not sink the other:
+    # ratingCount is a label, never a gate.
+    assert session.query(Business).filter_by(
+        cid="has-website-1").one().status is BusinessStatus.DISCOVERED
 
 
 def test_rediscovery_does_not_reinsert_or_reset_status(session):

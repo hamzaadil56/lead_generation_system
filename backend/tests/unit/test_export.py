@@ -60,3 +60,22 @@ def test_export_opens_the_csv_with_explicit_utf8_encoding(session, tmp_path, mon
         "export_leads must open the CSV with an explicit encoding='utf-8', "
         f"got args={captured.get('args')} kwargs={captured.get('kwargs')}"
     )
+
+
+def test_export_is_parameterised_by_ruleset_version(session, tmp_path):
+    """Deferred item 17: `ruleset_version` was hardcoded to "hvac_v1" and
+    not threaded from the CLI, so a second vertical exported 0 rows — a
+    failure that looks like "no leads matched" rather than a bug."""
+    b = Business(cid="c1", name="Plumbing Co", status=BusinessStatus.SCORED,
+                 phone_is_valid=False)
+    session.add(b)
+    session.flush()
+    session.add(Score(business_id=b.id, ruleset_version="plumbing_v1",
+                      fit_score=80, pain_score=80, quadrant="go_now",
+                      coverage=0.9, reasons=[]))
+    session.commit()
+
+    out = tmp_path / "leads.csv"
+    assert export_leads(session, None, 0, out) == 0            # hvac_v1 default
+    assert export_leads(session, None, 0, out,
+                        ruleset_version="plumbing_v1") == 1

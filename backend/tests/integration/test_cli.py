@@ -240,3 +240,17 @@ def test_an_aborted_stage_stops_run_all_and_exits_non_zero(cli_env, monkeypatch)
     assert cli_env.query(Score).count() == 0
     assert cli_env.query(Business).filter_by(
         status=BusinessStatus.SCORED).count() == 0
+
+
+def test_export_threads_the_ruleset_version_from_the_cli(cli_env, tmp_path):
+    """Deferred item 17 at the CLI seam: `export` must ask the vertical's
+    ruleset for its version rather than assume "hvac_v1"."""
+    import csv
+    assert _invoke_run_all().exit_code == 0
+    out = tmp_path / "leads.csv"
+
+    result = runner.invoke(cli.app, ["export", "--out", str(out),
+                                     "--vertical", "hvac"])
+    assert result.exit_code == 0, result.output
+    assert "hvac_v1" in result.output
+    assert len(list(csv.DictReader(out.open(encoding="utf-8")))) > 0

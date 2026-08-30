@@ -289,3 +289,41 @@ def test_a_run_permanent_error_aborts_the_enrich_stage(session):
         _scored(session, f"c{i}", fit=i * 10)
     report = FetchReviewsStage(DeadKey(), top_n=3).run(session, run_id=None)
     assert report.aborted is True
+
+
+def test_a_business_scored_under_two_versions_is_enriched_once(session):
+    """Deferred item 16: the candidate query joined `Score` without
+    filtering `ruleset_version`, so a business scored under two versions
+    appeared TWICE in `candidates`. The not-already-enriched guard is
+    evaluated once at query time, so it was enriched — and billed against
+    the 250/month free tier — twice in a single pass."""
+    b = _scored(session, "c1", fit=90)
+    session.add(Score(business_id=b.id, ruleset_version="hvac_v2",
+                      fit_score=95, pain_score=50, quadrant="nurture",
+                      coverage=0.6, reasons=[]))
+    session.commit()
+
+    provider = FakeReviewProvider([])
+    FetchReviewsStage(provider, top_n=5,
+                      ruleset_version="hvac_v1").run(session, run_id=None)
+    assert len(provider.calls) == 1
+
+
+def test_candidates_are_ranked_by_the_requested_ruleset_version(session):
+    """And the ordering must come from the version being used, not from
+    whichever row the join happened to pick."""
+    low = _scored(session, "low_under_v1", fit=10)
+    high = _scored(session, "high_under_v1", fit=90)
+    # Under v2 the ranking is reversed; the v1 run must ignore it.
+    session.add(Score(business_id=low.id, ruleset_version="hvac_v2",
+                      fit_score=99, pain_score=50, quadrant="nurture",
+                      coverage=0.6, reasons=[]))
+    session.commit()
+
+    provider = FakeReviewProvider([])
+    FetchReviewsStage(provider, top_n=1,
+                      ruleset_version="hvac_v1").run(session, run_id=None)
+    assert session.query(Business).filter_by(cid="high_under_v1").one().status \
+        is BusinessStatus.SITE_SCRAPED
+    assert session.query(Business).filter_by(cid="low_under_v1").one().status \
+        is BusinessStatus.SCORED
