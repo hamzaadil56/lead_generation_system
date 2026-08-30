@@ -2,12 +2,16 @@ from typing import Any
 
 import requests
 from firecrawl import Firecrawl
-from firecrawl.v2.utils.error_handler import FirecrawlError
+from firecrawl.v2.utils.error_handler import (
+    FirecrawlError,
+    RequestTimeoutError,
+    WebsiteNotSupportedError,
+)
 
 from app.clients.http_errors import raise_for_status_code
 from app.clients.protocols import ScrapeResult
 from app.core.config import get_settings
-from app.core.errors import TransientError
+from app.core.errors import BusinessPermanentError, TransientError
 
 PAGE_ALLOWLIST = ("/about", "/contact", "/services", "/team")
 
@@ -40,10 +44,24 @@ class FirecrawlScraper:
                                            # details and vendor badges (ADR-012)
                 timeout=30000,
             )
+        except WebsiteNotSupportedError as exc:
+            # Firecrawl returns 403 for a TARGET site it cannot fetch --
+            # bot protection, robots.txt -- not for a problem with our
+            # account. `classify_http_error` groups 403 with 401/402
+            # because that is what it means for every other provider, so
+            # the correction belongs here rather than in the taxonomy:
+            # five bot-protected sites in a row would otherwise trip the
+            # circuit breaker and kill a healthy run.
+            raise BusinessPermanentError(f"firecrawl: {exc}",
+                                         status_code=403) from exc
+        except RequestTimeoutError as exc:
+            # 408 fell through to BusinessPermanentError, recording a
+            # timeout as a fact about the business instead of retrying it.
+            raise TransientError(f"firecrawl: {exc}", status_code=408) from exc
         except FirecrawlError as exc:
             # Firecrawl's OWN API failed. Classify by its status code:
-            # 401/402/403 abort the run, 429/5xx retry, anything else is
-            # about this one request.
+            # 401/402 abort the run, 429/5xx retry, anything else is about
+            # this one request.
             raise_for_status_code(getattr(exc, "status_code", None),
                                   "firecrawl", str(exc))
         except requests.RequestException as exc:

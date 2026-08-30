@@ -119,3 +119,28 @@ def test_serper_transport_failure_is_transient_not_business_data():
 
     with pytest.raises(TransientError):
         _serper(handler).search("hvac houston")
+
+
+def test_website_not_supported_is_about_the_target_site_not_the_account():
+    """Confirmed concern from the previous wave. Firecrawl raises its 403
+    as `WebsiteNotSupportedError` -- bot protection or robots.txt on the
+    TARGET site, not a problem with our key. Routing it through
+    `classify_http_error` made it a RunPermanentError, so five
+    bot-protected sites in a row would trip the circuit breaker and kill a
+    healthy run. `classify_http_error` and the taxonomy are unchanged; only
+    this adapter's mapping is."""
+    from firecrawl.v2.utils.error_handler import WebsiteNotSupportedError
+    scraper = FirecrawlScraper(
+        client=_ExplodingFirecrawl(WebsiteNotSupportedError("blocked", 403)))
+    with pytest.raises(BusinessPermanentError):
+        scraper.scrape("https://bot-protected.example")
+
+
+def test_firecrawl_request_timeout_is_transient():
+    """408 fell through to BusinessPermanentError, so a timeout was
+    recorded as a fact about the business instead of being retried."""
+    from firecrawl.v2.utils.error_handler import RequestTimeoutError
+    scraper = FirecrawlScraper(
+        client=_ExplodingFirecrawl(RequestTimeoutError("timed out", 408)))
+    with pytest.raises(TransientError):
+        scraper.scrape("https://slow.example")
