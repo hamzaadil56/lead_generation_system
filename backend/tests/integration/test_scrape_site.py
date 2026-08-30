@@ -129,3 +129,38 @@ def test_firecrawl_running_out_of_credits_trips_the_circuit_breaker(session):
     assert session.query(Business).filter_by(
         status=BusinessStatus.SITE_SCRAPED).count() == 0
     assert session.query(RawPayload).filter_by(source="firecrawl").count() == 0
+
+
+def test_a_failed_firecrawl_call_logs_an_honest_api_call_row(session):
+    """C1 (compounding) / I2: scrape_site logged `credits=1,
+    status_code=200` unconditionally, including for calls that never
+    succeeded. `status_code=200` on a call that 402'd makes `api_calls`
+    actively misleading during exactly the incident you would use it to
+    diagnose."""
+    session.add(Business(cid="p1", name="p1", segment=Segment.GROWTH,
+                         website="https://example.com",
+                         status=BusinessStatus.DISCOVERED))
+    session.commit()
+
+    ScrapeSiteStage(_OutOfCreditsScraper(), per_segment=5).run(session, run_id=None)
+
+    call = session.query(ApiCall).filter_by(provider="firecrawl").one()
+    assert call.status_code == 402
+    assert call.credits == 0
+
+
+def test_a_dead_target_site_logs_the_targets_status_code(session):
+    class DeadScraper:
+        def scrape(self, url):
+            from app.clients.protocols import ScrapeResult
+            return ScrapeResult(url=url, status="dead", status_code=404, raw={})
+
+    session.add(Business(cid="p2", name="p2", segment=Segment.GROWTH,
+                         website="https://gone.example",
+                         status=BusinessStatus.DISCOVERED))
+    session.commit()
+
+    ScrapeSiteStage(DeadScraper(), per_segment=5).run(session, run_id=None)
+    call = session.query(ApiCall).filter_by(provider="firecrawl").one()
+    assert call.status_code == 404
+    assert call.credits == 1        # Firecrawl bills for the attempt

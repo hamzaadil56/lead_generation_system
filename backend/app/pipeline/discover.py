@@ -69,20 +69,30 @@ class DiscoverStage:
                         return report
                 try:
                     result = self._search(query, page)
-                except RunPermanentError as exc:
-                    # Bad key / out of credits: every remaining query would
-                    # fail the same way. Stop and say so rather than
-                    # reporting a short run as a successful one.
-                    report.aborted = True
-                    report.reason = str(exc)
-                    log.error("discover.aborted", reason=str(exc))
+                except (RunPermanentError, BusinessPermanentError,
+                        TransientError) as exc:
+                    # Every API call logs its actual cost, including one
+                    # that failed: a run with no row for a 401 is a run you
+                    # cannot diagnose from `api_calls` (I2).
+                    session.add(ApiCall(run_id=run_id, provider="serper",
+                                        endpoint="maps", credits=0,
+                                        status_code=exc.status_code,
+                                        created_at=datetime.utcnow()))
                     session.commit()
-                    return report
-                except BusinessPermanentError as exc:
-                    log.warning("discover.query_failed", term=query,
-                                page=page, error=str(exc))
-                    report.failed += 1
-                    break
+                    if isinstance(exc, RunPermanentError):
+                        # Bad key / out of credits: every remaining query
+                        # would fail the same way. Stop and say so rather
+                        # than reporting a short run as a successful one.
+                        report.aborted = True
+                        report.reason = str(exc)
+                        log.error("discover.aborted", reason=str(exc))
+                        return report
+                    if isinstance(exc, BusinessPermanentError):
+                        log.warning("discover.query_failed", term=query,
+                                    page=page, error=str(exc))
+                        report.failed += 1
+                        break
+                    raise
 
                 session.add(ApiCall(run_id=run_id, provider="serper",
                                     endpoint="maps", credits=result.credits,
@@ -92,13 +102,15 @@ class DiscoverStage:
                                         location=None,
                                         result_count=len(result.records),
                                         executed_at=datetime.utcnow()))
-                if not result.records:
-                    break
-
                 for record in result.records:
                     self._upsert(session, run_id, record, plan.vertical, report)
 
+                # Commit BEFORE the break: the cost rows for this page are
+                # already pending, and the old order discarded the final
+                # query's when the session closed uncommitted (I2).
                 session.commit()
+                if not result.records:
+                    break
 
         return report
 

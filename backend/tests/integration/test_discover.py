@@ -100,3 +100,38 @@ def test_a_dead_serper_key_aborts_discovery_instead_of_reporting_success(session
     assert report.aborted is True
     assert report.reason is not None
     assert provider.calls == 1          # not retried — it will never succeed
+
+
+def test_the_trailing_pages_api_call_is_not_discarded(session):
+    """I2(b): the `break` on an empty page fired after the ApiCall and
+    SearchQuery rows were added but BEFORE session.commit(). For every
+    query but the last, the next query's commit rescued them; the final
+    query's were dropped when the session closed uncommitted. Reproduced
+    as 2 real Serper calls, 1 ApiCall row persisted."""
+    from app.models.derived import ApiCall
+    from app.models.run import SearchQuery
+
+    plan = SearchPlan(vertical="hvac", search_terms=["hvac contractor"],
+                      locations=["Houston, TX"], pages_per_query=2)
+    provider = FakeSearchProvider()
+    DiscoverStage(provider).discover(session, run_id=None, plan=plan)
+    assert len(provider.calls) == 2
+
+    # What `get_session()` does when the stage returns without committing.
+    session.rollback()
+
+    assert session.query(ApiCall).filter_by(provider="serper").count() == 2
+    assert session.query(SearchQuery).count() == 2
+
+
+def test_a_failed_serper_call_is_still_logged_to_api_calls(session):
+    """The global constraint is 'every API call logs actual cost'. A call
+    that 401s consumed no credits but must still leave an honest row —
+    `api_calls` is the table you would use to diagnose the incident."""
+    from app.models.derived import ApiCall
+    DiscoverStage(_DeadKeyProvider()).discover(session, run_id=None, plan=PLAN)
+    session.rollback()
+
+    call = session.query(ApiCall).filter_by(provider="serper").one()
+    assert call.status_code == 401
+    assert call.credits == 0

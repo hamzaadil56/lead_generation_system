@@ -6,6 +6,7 @@ from sqlalchemy.orm import aliased
 
 from app.clients.protocols import ReviewProvider, ReviewResult
 from app.clients.serpapi_reviews import collect_recent_reviews, parse_iso_date
+from app.core.errors import ProviderError, RunPermanentError
 from app.domain.extractors.complaints import count_missed_call_complaints
 from app.models.business import Business, BusinessStatus
 from app.models.derived import ApiCall, RawPayload, Review, Score, Signals
@@ -22,8 +23,9 @@ MAX_CALLS_PER_BUSINESS = 4
 
 
 class _CountingReviewProvider:
-    """Wraps a real `ReviewProvider`, counting how many calls it actually
-    makes. `collect_recent_reviews` makes between 1 and `max_pages` calls
+    """Wraps a real `ReviewProvider`, counting how many calls actually
+    completed (and therefore billed) and keeping each page's raw response.
+    `collect_recent_reviews` makes between 1 and `max_pages` calls
     depending on paging, so this is the only way to log the *actual* cost
     of a business's enrichment instead of a fixed guess."""
 
@@ -36,8 +38,11 @@ class _CountingReviewProvider:
         self.raw_pages: list[dict] = []
 
     def reviews(self, data_id: str, page_token: str | None = None) -> ReviewResult:
-        self.calls += 1
+        # Counted AFTER the call returns: a page that raised consumed no
+        # SerpApi credit, and `credits` must be the actual cost, not the
+        # number of attempts.
         result = self._inner.reviews(data_id, page_token)
+        self.calls += 1
         self.raw_pages.append(result.raw)
         return result
 
@@ -101,13 +106,45 @@ class FetchReviewsStage:
                 break
 
             wrapper = _CountingReviewProvider(self._provider)
-            reviews = collect_recent_reviews(wrapper, business.cid)
-            spent += wrapper.calls
-            session.add(ApiCall(run_id=run_id, business_id=business.id,
-                                provider="serpapi",
-                                endpoint="google_maps_reviews",
-                                credits=wrapper.calls, status_code=200,
-                                created_at=datetime.utcnow()))
+            # The ApiCall row is written in `finally`, not after a
+            # successful return: `collect_recent_reviews` makes 1-4 real
+            # calls and a failure on page 3 used to consume two real
+            # credits with no row ever written -- invisible to
+            # `_spent_this_month`, so the 250/month free ceiling was
+            # computed from an undercount (I2). This stage is not a `Stage`
+            # subclass, so it inherits none of base.py's protections and
+            # had no try/except of any kind.
+            failure: ProviderError | None = None
+            try:
+                reviews = collect_recent_reviews(wrapper, business.cid)
+            except ProviderError as exc:
+                failure = exc
+                reviews = []
+            finally:
+                spent += wrapper.calls
+                session.add(ApiCall(
+                    run_id=run_id, business_id=business.id,
+                    provider="serpapi", endpoint="google_maps_reviews",
+                    credits=wrapper.calls,
+                    status_code=(failure.status_code if failure else 200),
+                    created_at=datetime.utcnow()))
+                session.commit()
+
+            if failure is not None:
+                report.failed += 1
+                log.warning("fetch_reviews.business_failed", cid=business.cid,
+                            error=str(failure))
+                if isinstance(failure, RunPermanentError):
+                    # A dead key fails identically for every remaining
+                    # business; do not burn the whole candidate list on it.
+                    report.aborted = True
+                    report.reason = str(failure)
+                    break
+                # The business keeps its SCORED status so a later run can
+                # retry it; only the ApiCall marker would block that, and
+                # a partial-credit row is the honest record of what was
+                # actually billed.
+                continue
             # One permanent payload per real call (ADR-003). `derived.py`
             # already lists `serpapi_reviews` as an expected source; nothing
             # was ever writing it, so the documented "drop the derived

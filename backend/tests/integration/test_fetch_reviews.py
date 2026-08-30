@@ -238,3 +238,54 @@ def test_a_never_enriched_business_keeps_review_signals_unknown(session):
     sig = session.query(Signals).filter_by(business_id=b.id).one()
     assert sig.missed_call_complaints_90d is None
     assert sig.review_velocity_90d is None
+
+
+class _FailsOnThirdPage:
+    """1 and 2 succeed (2 real SerpApi credits consumed), page 3 raises."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def reviews(self, data_id: str, page_token: str | None = None) -> ReviewResult:
+        from app.core.errors import TransientError
+        self.calls += 1
+        if self.calls >= 3:
+            raise TransientError("serpapi: HTTP 500", status_code=500)
+        return ReviewResult(
+            reviews=[ReviewRecord(iso_date=_recent(5), snippet="a")],
+            next_page_token="tok", raw={"page": self.calls})
+
+
+def test_credits_consumed_before_a_failure_are_still_logged(session):
+    """I2(a): FetchReviewsStage had no error handling of any kind and wrote
+    the ApiCall row only AFTER collect_recent_reviews returned. A provider
+    error on page 3 meant two real credits were consumed and NO row was
+    ever written — invisible to `_spent_this_month`, so the 250/month free
+    ceiling is computed from an undercount."""
+    b = _scored(session, "c1", fit=90)
+    provider = _FailsOnThirdPage()
+
+    report = FetchReviewsStage(provider, top_n=1).run(session, run_id=None)
+
+    assert provider.calls == 3
+    call = session.query(ApiCall).filter_by(
+        business_id=b.id, provider="serpapi").one()
+    assert call.credits == 2          # the two pages that really billed
+    assert call.status_code == 500
+    assert report.failed == 1
+    # The failure is this business's, not the stage's: status is untouched
+    # so a later run can retry it.
+    assert session.query(Business).filter_by(cid="c1").one().status \
+        is BusinessStatus.SCORED
+
+
+def test_a_run_permanent_error_aborts_the_enrich_stage(session):
+    class DeadKey:
+        def reviews(self, data_id, page_token=None):
+            from app.core.errors import RunPermanentError
+            raise RunPermanentError("serpapi: HTTP 401", status_code=401)
+
+    for i in range(3):
+        _scored(session, f"c{i}", fit=i * 10)
+    report = FetchReviewsStage(DeadKey(), top_n=3).run(session, run_id=None)
+    assert report.aborted is True

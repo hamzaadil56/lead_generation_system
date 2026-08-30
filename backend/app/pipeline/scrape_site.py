@@ -1,6 +1,7 @@
 from datetime import datetime
 
-from app.clients.protocols import WebScraper
+from app.clients.protocols import ScrapeResult, WebScraper
+from app.core.errors import ProviderError
 from app.domain.sampling import stratify
 from app.models.business import Business, BusinessStatus
 from app.models.derived import RawPayload, ApiCall
@@ -34,22 +35,44 @@ class ScrapeSiteStage(Stage):
                         key=lambda b: str(b.segment) if b.segment else None,
                         per_group=self._per_segment)
 
+    def _scrape(self, url: str, business_id: int, session) -> ScrapeResult:
+        """Scrape one URL and log exactly one honest `api_calls` row.
+
+        The old code logged `credits=1, status_code=200` unconditionally,
+        including for calls that never succeeded -- so during the incident
+        you would use `api_calls` to diagnose, it says every 402 was a
+        successful, billed 200 (C1's compounding note / I2).
+        """
+        try:
+            result = self._scraper.scrape(url)
+        except ProviderError as exc:
+            session.add(ApiCall(run_id=self._run_id, business_id=business_id,
+                                provider="firecrawl", endpoint="scrape",
+                                credits=0, status_code=exc.status_code,
+                                created_at=datetime.utcnow()))
+            session.commit()
+            raise
+
+        session.add(ApiCall(run_id=self._run_id, business_id=business_id,
+                            provider="firecrawl", endpoint="scrape",
+                            # Firecrawl bills the attempt even when the
+                            # target site is dead.
+                            credits=1, status_code=result.status_code or 200,
+                            created_at=datetime.utcnow()))
+        return result
+
     def process(self, business: Business, session) -> None:
         # select()'s Business.website.isnot(None) filter guarantees this at
         # runtime, but mypy can't see through a SQL filter — narrow here.
         assert business.website is not None
         website = business.website
 
-        home = self._scraper.scrape(website)
+        home = self._scrape(website, business.id, session)
         session.add(RawPayload(business_id=business.id, source="firecrawl",
                                url=website,
                                payload=home.model_dump(),
                                raw_text=home.raw_html,
                                fetched_at=datetime.utcnow()))
-        session.add(ApiCall(run_id=self._run_id, business_id=business.id,
-                            provider="firecrawl",
-                            endpoint="scrape", credits=1, status_code=200,
-                            created_at=datetime.utcnow()))
 
         if home.status != "ok":
             return      # dead site: advance with reduced coverage, not FAILED
@@ -61,12 +84,8 @@ class ScrapeSiteStage(Stage):
         ][: MAX_PAGES - 1]
 
         for url in targets:
-            page = self._scraper.scrape(url)
+            page = self._scrape(url, business.id, session)
             session.add(RawPayload(business_id=business.id, source="firecrawl",
                                    url=url, payload=page.model_dump(),
                                    raw_text=page.raw_html,
                                    fetched_at=datetime.utcnow()))
-            session.add(ApiCall(run_id=self._run_id, business_id=business.id,
-                                provider="firecrawl",
-                                endpoint="scrape", credits=1, status_code=200,
-                                created_at=datetime.utcnow()))
