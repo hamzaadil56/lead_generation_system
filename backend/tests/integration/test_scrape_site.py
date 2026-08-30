@@ -212,3 +212,56 @@ def test_businesses_further_down_the_pipeline_still_count_toward_the_cap(session
     scraper = FakeWebScraper()
     ScrapeSiteStage(scraper, per_segment=4).run(session, run_id=None)
     assert len(scraper.calls) == 1     # 3 already counted against a cap of 4
+
+
+class _AlwaysTransientScraper:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def scrape(self, url):
+        from app.core.errors import TransientError
+        self.calls += 1
+        raise TransientError("firecrawl: HTTP 429", status_code=429)
+
+
+def test_a_transient_firecrawl_error_is_actually_retried(session):
+    """N1: `_scrape` committed inside the per-business SAVEPOINT to make
+    the failed-call api_calls row durable. That commit closed the savepoint
+    and expired the ORM, so tenacity's second attempt hit a detached
+    `business` and raised a SQLAlchemy error instead of retrying. One 429
+    therefore cost exactly ONE provider call, marked the business FAILED
+    with a SQLAlchemy message as its error text -- and since the
+    per-segment cap is now cumulative, that FAILED row permanently consumes
+    a slot in the stratified sample."""
+    session.add(Business(cid="t1", name="t1", segment=Segment.GROWTH,
+                         website="https://example.com",
+                         status=BusinessStatus.DISCOVERED))
+    session.commit()
+
+    scraper = _AlwaysTransientScraper()
+    report = ScrapeSiteStage(scraper, per_segment=5).run(session, run_id=None)
+
+    assert scraper.calls == 3, "tenacity must make 3 attempts, not 1"
+    assert report.failed == 1
+    b = session.query(Business).filter_by(cid="t1").one()
+    assert b.status is BusinessStatus.FAILED
+    # The recorded cause must be the provider's, not SQLAlchemy's.
+    assert "429" in b.error_message
+    assert "sqlalchemy" not in b.error_message.lower()
+
+
+def test_the_failed_call_row_stays_durable_across_the_retry_fix(session):
+    """Finding 6 must survive N1's fix: the api_calls row for a call that
+    really happened is still written, just no longer from inside the
+    retry path."""
+    session.add(Business(cid="t2", name="t2", segment=Segment.GROWTH,
+                         website="https://example.com",
+                         status=BusinessStatus.DISCOVERED))
+    session.commit()
+
+    ScrapeSiteStage(_AlwaysTransientScraper(), per_segment=5).run(
+        session, run_id=None)
+
+    calls = session.query(ApiCall).filter_by(provider="firecrawl").all()
+    assert len(calls) == 3          # one honest row per real attempt
+    assert all(c.credits == 0 and c.status_code == 429 for c in calls)

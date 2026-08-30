@@ -47,6 +47,24 @@ class Stage(ABC):
     @abstractmethod
     def process(self, business: Business, session: Session) -> None: ...
 
+    def on_failure(self, business: Business, session: Session,
+                   exc: BaseException) -> None:
+        """Hook: record durable side-effects of a business that failed.
+
+        Called AFTER the per-business SAVEPOINT has unwound and BEFORE the
+        error handlers below, so a stage can persist rows describing what
+        really happened (an `api_calls` row for a provider call that was
+        actually made) without committing from inside `process`.
+
+        That distinction is the whole point. `scrape_site` used to commit
+        the failed-call row from within `process`, which closed the
+        savepoint and expired the ORM -- so tenacity's second attempt hit a
+        detached `business` and raised a SQLAlchemy error instead of
+        retrying. One Firecrawl 429 cost exactly one provider call and a
+        permanently FAILED business (N1). Anything added here is committed
+        by `run`.
+        """
+
     def select(self, session: Session, run_id: int | None, limit: int) -> list[Business]:
         q = session.query(Business).filter(Business.status == self.consumes)
         return q.limit(limit).all()
@@ -85,15 +103,24 @@ class Stage(ABC):
                     break
 
             try:
-                # A SAVEPOINT scopes rollback to *this business only*: on
-                # failure only this unit of work unwinds, leaving prior
-                # committed businesses (and the outer transaction) intact.
-                # Plain session.rollback() would roll back the whole
-                # transaction the Session participates in, which is too
-                # coarse for per-business isolation (see ADR-009 note below).
-                with session.begin_nested():
-                    self._process_with_retry(business, session)
-                    business.status = self.produces
+                try:
+                    # A SAVEPOINT scopes rollback to *this business only*:
+                    # on failure only this unit of work unwinds, leaving
+                    # prior committed businesses (and the outer
+                    # transaction) intact. Plain session.rollback() would
+                    # roll back the whole transaction the Session
+                    # participates in, which is too coarse for per-business
+                    # isolation (see ADR-009 note below).
+                    with session.begin_nested():
+                        self._process_with_retry(business, session)
+                        business.status = self.produces
+                except Exception as exc:
+                    # The savepoint has already unwound, so it is safe to
+                    # commit here -- and only here. Nothing inside the
+                    # retry path may commit (N1).
+                    self.on_failure(business, session, exc)
+                    session.commit()
+                    raise
                 session.commit()          # Unit of Work per business (ADR-009)
                 report.processed += 1
                 consecutive_fatal = 0

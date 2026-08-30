@@ -31,6 +31,10 @@ class ScrapeSiteStage(Stage):
     def __init__(self, scraper: WebScraper, per_segment: int = 15) -> None:
         self._scraper = scraper
         self._per_segment = per_segment
+        # Buffered ApiCall kwargs for the business currently being
+        # processed; drained by _flush_calls on both the success and the
+        # failure path.
+        self._call_log: list[dict] = []
 
     def _already_sampled(self, session) -> dict[str, int]:
         rows = (session.query(Business.segment, func.count(Business.id))
@@ -61,8 +65,19 @@ class ScrapeSiteStage(Stage):
                         per_group=self._per_segment,
                         already_taken=self._already_sampled(session))
 
-    def _scrape(self, url: str, business_id: int, session) -> ScrapeResult:
-        """Scrape one URL and log exactly one honest `api_calls` row.
+    def _scrape(self, url: str, business_id: int) -> ScrapeResult:
+        """Scrape one URL and RECORD one honest `api_calls` row.
+
+        Recorded, not written: the row is buffered on `_call_log` and
+        flushed into the session by `_flush_calls`, which the success path
+        calls at the end of `process` and the failure path calls from
+        `on_failure` (after the savepoint has unwound). Writing and
+        committing it here closed the per-business savepoint mid-retry and
+        killed tenacity outright (N1).
+
+        Buffering across attempts is deliberate: a retried business really
+        did make the earlier attempts' calls, and all of them belong in
+        `api_calls`.
 
         The old code logged `credits=1, status_code=200` unconditionally,
         including for calls that never succeeded -- so during the incident
@@ -72,20 +87,30 @@ class ScrapeSiteStage(Stage):
         try:
             result = self._scraper.scrape(url)
         except ProviderError as exc:
-            session.add(ApiCall(run_id=self._run_id, business_id=business_id,
-                                provider="firecrawl", endpoint="scrape",
-                                credits=0, status_code=exc.status_code,
-                                created_at=datetime.utcnow()))
-            session.commit()
+            self._call_log.append(dict(
+                run_id=self._run_id, business_id=business_id,
+                provider="firecrawl", endpoint="scrape",
+                credits=0, status_code=exc.status_code,
+                created_at=datetime.utcnow()))
             raise
 
-        session.add(ApiCall(run_id=self._run_id, business_id=business_id,
-                            provider="firecrawl", endpoint="scrape",
-                            # Firecrawl bills the attempt even when the
-                            # target site is dead.
-                            credits=1, status_code=result.status_code or 200,
-                            created_at=datetime.utcnow()))
+        self._call_log.append(dict(
+            run_id=self._run_id, business_id=business_id,
+            provider="firecrawl", endpoint="scrape",
+            # Firecrawl bills the attempt even when the target site is dead.
+            credits=1, status_code=result.status_code or 200,
+            created_at=datetime.utcnow()))
         return result
+
+    def _flush_calls(self, session) -> None:
+        for call in self._call_log:
+            session.add(ApiCall(**call))
+        self._call_log = []
+
+    def on_failure(self, business: Business, session, exc: BaseException) -> None:
+        # Every call this business really made, including the one that
+        # failed, survives the savepoint rollback (finding 6).
+        self._flush_calls(session)
 
     def process(self, business: Business, session) -> None:
         # select()'s Business.website.isnot(None) filter guarantees this at
@@ -93,7 +118,7 @@ class ScrapeSiteStage(Stage):
         assert business.website is not None
         website = business.website
 
-        home = self._scrape(website, business.id, session)
+        home = self._scrape(website, business.id)
         session.add(RawPayload(business_id=business.id, source="firecrawl",
                                url=website,
                                payload=home.model_dump(),
@@ -101,6 +126,7 @@ class ScrapeSiteStage(Stage):
                                fetched_at=datetime.utcnow()))
 
         if home.status != "ok":
+            self._flush_calls(session)
             return      # dead site: advance with reduced coverage, not FAILED
 
         # Use the returned links rather than guessing paths (ADR-012).
@@ -110,8 +136,10 @@ class ScrapeSiteStage(Stage):
         ][: MAX_PAGES - 1]
 
         for url in targets:
-            page = self._scrape(url, business.id, session)
+            page = self._scrape(url, business.id)
             session.add(RawPayload(business_id=business.id, source="firecrawl",
                                    url=url, payload=page.model_dump(),
                                    raw_text=page.raw_html,
                                    fetched_at=datetime.utcnow()))
+
+        self._flush_calls(session)
