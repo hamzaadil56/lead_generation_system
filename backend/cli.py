@@ -20,7 +20,7 @@ from app.pipeline.scrape_site import ScrapeSiteStage
 from app.services.budget import BudgetExceeded, check_budget, spend_usd
 from app.services.export import export_leads
 from app.services.outcomes import record_outcome
-from app.services.rulesets import read_ruleset_file
+from app.services.rulesets import read_ruleset_definition, read_ruleset_file
 from app.services.search_plan import build_search_plan
 
 app = typer.Typer()
@@ -67,9 +67,17 @@ def _plan(vertical: str, state: str | None, location: str | None, pages: int):
     )
 
 
-def _ruleset(vertical: str):
+def _ruleset_path(vertical: str) -> Path:
     cfg = yaml.safe_load((CONFIG / "verticals.yaml").read_text())
-    return read_ruleset_file(CONFIG / "rulesets" / f"{cfg[vertical]['ruleset']}.yaml")
+    return CONFIG / "rulesets" / f"{cfg[vertical]['ruleset']}.yaml"
+
+
+def _ruleset(vertical: str):
+    return read_ruleset_file(_ruleset_path(vertical))
+
+
+def _ruleset_definition(vertical: str) -> dict:
+    return read_ruleset_definition(_ruleset_path(vertical))
 
 
 @app.command()
@@ -104,7 +112,8 @@ def extract(run_id: int | None = None) -> None:
 @app.command()
 def score(vertical: str = "hvac", run_id: int | None = None) -> None:
     with get_session() as s:
-        _report(ScoreStage(_ruleset(vertical)).run(s, run_id))
+        _report(ScoreStage(_ruleset(vertical),
+                           definition=_ruleset_definition(vertical)).run(s, run_id))
 
 
 @app.command()

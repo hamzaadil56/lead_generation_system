@@ -118,3 +118,60 @@ def test_dead_site_scores_materially_lower_coverage_than_a_scraped_site(session)
     dead_rules = {r["rule"] for r in dead_score.reasons}
     assert "no_chat_widget" not in dead_rules
     assert "no_chat_widget" in {r["rule"] for r in alive_score.reasons}
+
+
+def test_embedded_vendor_scheduler_is_a_fallback_for_booking_vendor(session):
+    """I4/ADR-023: `software_from_html` was extracted, stored and tested but
+    scored by nothing, so ADR-023's named cases (House Pro embeds
+    ServiceTitan, Revolution Air embeds Housecall Pro — both with
+    bookingLinks pointing only at their own site) scored 0 on the
+    30-point `field_service_software` fit rule and the ~10% detection
+    uplift the ADR paid for was never realised.
+
+    ADR-023 calls it a "secondary vendor source", so it is applied as a
+    fallback for `booking_vendor` here rather than as a new scoring rule:
+    `hvac_v1.yaml` is pinned by five golden tests hand-computed from real
+    Houston data."""
+    from datetime import datetime
+    from app.models.derived import RawPayload
+    html = '<script src="https://embed.scheduler.servicetitan.com/x.js"></script>'
+    b = Business(cid="housepro", name="House Pro",
+                 status=BusinessStatus.SITE_SCRAPED,
+                 website="https://housepro.example",
+                 booking_links=["https://housepro.example/schedule"])
+    session.add(b); session.flush()
+    session.add(RawPayload(business_id=b.id, source="firecrawl",
+                           url=b.website,
+                           payload={"url": b.website, "status": "ok",
+                                    "markdown": "book now", "raw_html": html,
+                                    "links": [], "raw": {}},
+                           raw_text=html, fetched_at=datetime.utcnow()))
+    session.commit()
+
+    ExtractSignalsStage().run(session, run_id=None)
+    sig = session.query(Signals).filter_by(business_id=b.id).one()
+    assert sig.software_from_html == "servicetitan"
+    # Without the fallback this stayed "own" and the 30-point rule missed.
+    assert sig.booking_vendor == "servicetitan"
+
+
+def test_a_recognised_booking_vendor_is_not_overwritten_by_html(session):
+    from datetime import datetime
+    from app.models.derived import RawPayload
+    html = '<script src="https://embed.scheduler.servicetitan.com/x.js"></script>'
+    b = Business(cid="jobberco", name="Jobber Co",
+                 status=BusinessStatus.SITE_SCRAPED,
+                 website="https://jobberco.example",
+                 booking_links=["https://clienthub.getjobber.com/x"])
+    session.add(b); session.flush()
+    session.add(RawPayload(business_id=b.id, source="firecrawl",
+                           url=b.website,
+                           payload={"url": b.website, "status": "ok",
+                                    "markdown": "", "raw_html": html,
+                                    "links": [], "raw": {}},
+                           raw_text=html, fetched_at=datetime.utcnow()))
+    session.commit()
+
+    ExtractSignalsStage().run(session, run_id=None)
+    sig = session.query(Signals).filter_by(business_id=b.id).one()
+    assert sig.booking_vendor == "jobber"

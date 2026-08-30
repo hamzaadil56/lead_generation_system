@@ -14,6 +14,12 @@ EXTRACTOR_VERSION = "1"
 # serpapi_reviews.py), so re-deriving reproduces what fetch_reviews wrote.
 REVIEW_WINDOW_DAYS = 90
 
+# The values the 30-point `field_service_software` fit rule recognises
+# (config/rulesets/hvac_v1.yaml). Kept here, not in the ruleset, because
+# the fallback below is an extraction concern: ADR-023 calls
+# `software_from_html` a *secondary vendor source*, not a separate rule.
+_RECOGNISED_VENDORS = ("servicetitan", "jobber", "housecallpro")
+
 
 class ExtractSignalsStage(Stage):
     name = "extract_signals"
@@ -42,6 +48,16 @@ class ExtractSignalsStage(Stage):
         values["website_status"] = payload.get("status", "none")
 
         values.update(self._review_signals(business, session))
+
+        # ADR-023 (I4): two of the twenty sampled businesses had Serper
+        # bookingLinks pointing only at their own site while embedding a
+        # vendor scheduler in the page. `software_from_html` was extracted,
+        # stored and tested but read by nothing, so those businesses scored
+        # 0 on the highest-weighted fit rule. Applied BEFORE the manual
+        # overlay so manual facts still win.
+        if (values.get("booking_vendor") not in _RECOGNISED_VENDORS
+                and values.get("software_from_html")):
+            values["booking_vendor"] = values["software_from_html"]
 
         # Manual facts overlay LAST — they always win (ADR-008).
         manual = session.query(ManualFacts).filter_by(
