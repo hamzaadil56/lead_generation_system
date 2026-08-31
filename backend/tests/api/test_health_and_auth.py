@@ -17,3 +17,23 @@ def test_a_protected_route_rejects_a_wrong_key(client):
 
 def test_a_protected_route_accepts_the_right_key(client):
     assert client.get("/runs").status_code == 200
+
+
+def test_a_protected_route_rejects_a_non_ascii_key(client):
+    """A non-ASCII header must fail closed, not crash `compare_digest`.
+
+    `secrets.compare_digest` raises TypeError on non-ASCII str operands.
+    Sent as raw bytes so httpx does not reject it client-side before it
+    ever reaches the app.
+    """
+    client.headers.update({"X-API-Key": "café".encode("utf-8")})
+    r = client.get("/runs")
+    assert r.status_code == 401
+    assert r.json()["detail"] == "invalid or missing API key"
+
+
+def test_a_protected_route_rejects_an_empty_key(client):
+    client.headers.update({"X-API-Key": ""})
+    r = client.get("/runs")
+    assert r.status_code == 401
+    assert r.json()["detail"] == "invalid or missing API key"

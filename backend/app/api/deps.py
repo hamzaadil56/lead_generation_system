@@ -26,10 +26,13 @@ def require_api_key(x_api_key: str | None = Header(None)) -> None:
 
     `compare_digest` rather than `==` so the check is not timing-variable.
     A missing configured key fails closed -- an unset API_KEY must not mean
-    "no auth required".
+    "no auth required". Both sides are encoded to bytes before comparing:
+    `compare_digest` rejects `str` operands containing non-ASCII characters
+    with a `TypeError`, and a malformed header must fail closed as a 401,
+    not surface as an unhandled 500 on the auth boundary.
     """
     configured = get_settings().api_key
     if not configured or not x_api_key or not secrets.compare_digest(
-            x_api_key, configured):
+            x_api_key.encode("utf-8"), configured.encode("utf-8")):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                             detail="invalid or missing API key")
