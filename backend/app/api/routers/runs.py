@@ -21,16 +21,6 @@ def _configs() -> tuple[dict, dict]:
             yaml.safe_load((CONFIG / "locations.yaml").read_text()))
 
 
-def _normalized_state(state: str | None) -> str | None:
-    """`config/locations.yaml` keys states by lowercase code (`tx`), but a
-    client naturally types the two-letter abbreviation as it is normally
-    written (`TX`). Normalizing here -- rather than in `build_search_plan`,
-    which is shared with the CLI and the scheduler -- keeps this a router
-    concern: an API client's casing habits should not change the shared
-    plan-building contract."""
-    return state.lower() if state else None
-
-
 @router.post("", response_model=RunOut, status_code=201)
 def create_run(body: RunCreate, db: Session = Depends(get_db)) -> RunOut:
     """Queue a run. The scheduler executes it within ~30s.
@@ -44,8 +34,7 @@ def create_run(body: RunCreate, db: Session = Depends(get_db)) -> RunOut:
                             detail=f"unknown vertical: {body.vertical}")
 
     run = Run(status="queued", source="ui",
-              search_plan={"vertical": body.vertical,
-                           "state": _normalized_state(body.state),
+              search_plan={"vertical": body.vertical, "state": body.state,
                            "location": body.location, "pages": body.pages},
               max_cost_usd=body.max_cost_usd, created_at=datetime.utcnow())
     db.add(run)
@@ -61,9 +50,8 @@ def preview_run(body: RunCreate, db: Session = Depends(get_db)) -> PreviewOut:
     if body.vertical not in verticals_cfg:
         raise HTTPException(status_code=400,
                             detail=f"unknown vertical: {body.vertical}")
-    return preview_search_plan(db, body.vertical, _normalized_state(body.state),
-                               body.location, body.pages, verticals_cfg,
-                               locations_cfg)
+    return preview_search_plan(db, body.vertical, body.state, body.location,
+                               body.pages, verticals_cfg, locations_cfg)
 
 
 @router.get("", response_model=Page[RunOut])

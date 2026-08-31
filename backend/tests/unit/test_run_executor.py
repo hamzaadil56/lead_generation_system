@@ -55,6 +55,24 @@ def _factory(session):
     return f
 
 
+def test_execute_run_resolves_an_uppercase_state_via_build_search_plan(
+        session, providers):
+    """A run queued by the CLI or the API with `state="TX"` must not strand
+    at `running` because `config/locations.yaml` keys states lowercase
+    (`tx`). `build_search_plan` is what normalises now (search_plan.py), so
+    this exercises the real path `execute_run` takes -- not a mock of it."""
+    run = Run(status="queued", source="cli",
+             search_plan={"vertical": "hvac", "state": "TX",
+                          "location": None, "pages": 1})
+    session.add(run)
+    session.commit()
+
+    result = execute_run(run.id, providers=providers,
+                         session_factory=_factory(session))
+
+    assert result.status == "complete"
+
+
 def test_execute_run_walks_every_stage_in_order(session, queued_run, providers):
     result = execute_run(queued_run.id, providers=providers,
                          session_factory=_factory(session))

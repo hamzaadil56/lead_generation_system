@@ -35,6 +35,18 @@ def test_post_runs_stores_the_cost_ceiling(client, session):
     assert r.json()["max_cost_usd"] == 1.5
 
 
+def test_post_runs_accepts_a_state_only_plan(client):
+    """`config/locations.yaml` keys states lowercase (`tx`); a client typing
+    the conventional uppercase abbreviation must not be rejected. Queuing
+    only stores the plan (`build_search_plan` does the state lookup, and
+    only runs at execution time), so this mainly guards against a
+    regression that rejects `state` plans at creation time."""
+    r = client.post("/runs", json={"vertical": "hvac", "state": "TX"})
+
+    assert r.status_code == 201
+    assert r.json()["search_plan"]["state"] == "TX"
+
+
 def test_get_runs_returns_a_page_envelope(client):
     client.post("/runs", json={"vertical": "hvac", "location": "Houston, TX"})
 
@@ -82,3 +94,21 @@ def test_preview_rejects_an_unknown_vertical(client):
     r = client.post("/runs/preview", json={"vertical": "not_a_vertical",
                                            "location": "Houston, TX"})
     assert r.status_code in (400, 422)
+
+
+def test_preview_rejects_an_unknown_state(client):
+    """An unknown state reaches `build_search_plan`, which raises a
+    `ValueError` -- caught by the app-level handler and rendered as 400, not
+    an unhandled `KeyError` surfacing as a 500."""
+    r = client.post("/runs/preview", json={"vertical": "hvac", "state": "ZZ"})
+    assert r.status_code == 400
+
+
+def test_preview_accepts_a_lowercase_or_mixed_case_state(client):
+    lower = client.post("/runs/preview",
+                        json={"vertical": "hvac", "state": "tx", "pages": 1})
+    upper = client.post("/runs/preview",
+                        json={"vertical": "hvac", "state": "TX", "pages": 1})
+
+    assert lower.status_code == upper.status_code == 200
+    assert lower.json()["queries"] == upper.json()["queries"]
