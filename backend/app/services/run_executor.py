@@ -250,6 +250,22 @@ def execute_run(run_id: int, *, providers: Providers | None = None,
                 check_budget(s, run_id, ceiling)
                 report = fn(s)
                 s.commit()
+            result.stages.append((name, report))
+            if on_stage is not None:
+                # Reported here, not after the loop: on the re-raise path a
+                # buffered summary is lost entirely, which is precisely when
+                # the operator most needs to know how far the run got.
+                #
+                # Inside the `try`, not after it: the observer belongs to the
+                # caller and can raise. The CLI passes `echo_stage`, and
+                # `typer.echo` raises BrokenPipeError on a closed stdout
+                # (`python -m cli run-all ... | head`). Called outside, that
+                # left the Run at `running` with no finished_at -- the one
+                # in-process path that still stranded a run. The exception
+                # still propagates; the handler below just makes sure the
+                # terminal write lands first, and the stored traceback names
+                # the observer frame so it is not mistaken for a stage bug.
+                on_stage(name, report)
         except BudgetExceeded as exc:
             log.warning("run.budget_exceeded", run_id=run_id, stage=name,
                         reason=str(exc))
@@ -268,13 +284,6 @@ def execute_run(run_id: int, *, providers: Providers | None = None,
             error = f"{name} failed: {traceback.format_exc()[-2000:]}"
             _terminal(session_factory, run_id, "failed", error)
             raise
-
-        result.stages.append((name, report))
-        if on_stage is not None:
-            # Reported here, not after the loop: on the re-raise path a
-            # buffered summary is lost entirely, which is precisely when
-            # the operator most needs to know how far the run got.
-            on_stage(name, report)
 
         if report.aborted:
             # `StageReport.aborted` was once echoed and then ignored: a

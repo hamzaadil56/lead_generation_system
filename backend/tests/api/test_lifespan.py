@@ -27,8 +27,10 @@ from fastapi.testclient import TestClient
 
 from app.api.app import create_app
 
-JOB_IDS = {"poll_queued_runs", "reset_stuck_runs",
-           "retry_failed_businesses", "refresh_stale_businesses"}
+# `reset_stuck_runs` is intentionally absent: it is called once at startup,
+# never on a timer (a timed reconciler requeues live runs mid-flight).
+JOB_IDS = {"poll_queued_runs", "retry_failed_businesses",
+           "refresh_stale_businesses"}
 
 
 @pytest.fixture

@@ -144,16 +144,18 @@ def test_reset_stuck_runs_with_a_zero_cutoff_requeues_anything_running(
     assert session.query(Run).one().status == "queued"
 
 
-def test_build_scheduler_registers_reset_stuck_runs_hourly(patched):
-    """`reset_stuck_runs` must also be on a timer, not startup-only.
+def test_build_scheduler_does_not_put_reset_stuck_runs_on_a_timer(patched):
+    """`reset_stuck_runs` is startup-only, and must stay that way.
 
-    Startup-only meant a process restarting within an hour of a run
-    starting skipped that row and nothing ever re-checked it: stranded
-    permanently. The hourly job is correct under any topology; the
-    startup call (cutoff 0) only makes recovery immediate.
+    A timed reconciler cannot tell *abandoned by a dead process* from
+    *still executing in this one*: `started_at` is stamped once and never
+    refreshed, so a run still going past the cutoff would be flipped back
+    to `queued` mid-flight and the next 30-second poll would re-claim and
+    concurrently re-execute the same run_id -- double billing and two
+    writers on the same rows. The startup call has no such race because it
+    fires before the scheduler starts, when no run can be in flight.
     """
     jobs = {j.id: j for j in patched.build_scheduler().get_jobs()}
 
-    assert set(jobs) == {"poll_queued_runs", "reset_stuck_runs",
-                         "retry_failed_businesses", "refresh_stale_businesses"}
-    assert str(jobs["reset_stuck_runs"].trigger) == "interval[1:00:00]"
+    assert set(jobs) == {"poll_queued_runs", "retry_failed_businesses",
+                         "refresh_stale_businesses"}

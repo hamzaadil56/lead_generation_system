@@ -115,23 +115,24 @@ def refresh_stale_businesses(older_than_days: int = 90) -> int:
 
 
 def build_scheduler() -> BackgroundScheduler:
-    """Wire the four recurring jobs. `max_instances=1` on the poller stops a
+    """Wire the three recurring jobs. `max_instances=1` on the poller stops a
     slow run from being started twice while the first is still going.
 
-    `reset_stuck_runs` is on an hourly timer *as well as* being called once
-    from the app's lifespan at startup. Startup-only was not enough: a
-    process restarting within `max_age_hours` of a run starting skipped
-    that row, and nothing ever looked at it again -- stranded permanently.
-    The hourly job is correct under any topology; the startup call (which
-    passes a cutoff of 0) only makes recovery immediate instead of taking
-    up to an hour.
+    `reset_stuck_runs` is deliberately NOT among them. It was registered on
+    an hourly timer for one round and removed: a timed reconciler cannot
+    tell a run abandoned by a dead process from one still executing in this
+    one. `execute_run` stamps `started_at` once and never refreshes it, so
+    any run still going past the cutoff was flipped back to `queued`
+    mid-flight and the next 30-second poll re-claimed and concurrently
+    re-executed the same run_id -- double billing, two writers on the same
+    rows. Fixing that properly needs a heartbeat column, which is DDL this
+    plan does not have. The startup call in the app's lifespan has no such
+    race and covers the case that matters; see the comment there before
+    re-adding a timer here.
     """
     scheduler = BackgroundScheduler(timezone="UTC")
     scheduler.add_job(poll_queued_runs, "interval", seconds=30,
                       id="poll_queued_runs", max_instances=1,
-                      coalesce=True, replace_existing=True)
-    scheduler.add_job(reset_stuck_runs, "interval", hours=1,
-                      id="reset_stuck_runs", max_instances=1,
                       coalesce=True, replace_existing=True)
     scheduler.add_job(retry_failed_businesses, "cron", hour=3, minute=0,
                       id="retry_failed_businesses", replace_existing=True)

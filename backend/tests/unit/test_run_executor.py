@@ -351,3 +351,28 @@ def test_execute_run_writes_terminal_state_when_provider_construction_fails(
     assert run.status == "failed"
     assert run.finished_at is not None
     assert run.error is not None
+
+
+def test_execute_run_writes_terminal_state_when_the_progress_observer_raises(
+        session, queued_run, providers):
+    """The `on_stage` observer was called outside the per-stage `try`.
+
+    The scheduler passes no observer, but the CLI passes `echo_stage`, and
+    `typer.echo` raises BrokenPipeError on a closed stdout -- `python -m cli
+    run-all ... | head` is enough to produce one. The exception must still
+    propagate, but the Run must not be left at `running`: with the hourly
+    reconciler gone, startup is the only reconciliation point and nothing
+    would revisit this row until the process restarts.
+    """
+    def boom(name: str, report: object) -> None:
+        raise BrokenPipeError("stdout closed")
+
+    with pytest.raises(BrokenPipeError):
+        execute_run(queued_run.id, providers=providers,
+                    session_factory=_factory(session), on_stage=boom)
+
+    session.expire_all()
+    run = session.query(Run).filter_by(id=queued_run.id).one()
+    assert run.status == "failed"
+    assert run.finished_at is not None
+    assert run.error is not None
