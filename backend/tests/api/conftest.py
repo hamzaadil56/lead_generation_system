@@ -30,7 +30,9 @@ def client(session, monkeypatch):
     from app.core.config import get_settings
     get_settings.cache_clear()
 
-    app = create_app()
+    # A background scheduler inside the test suite would claim queued
+    # runs and execute them against the real, paid providers.
+    app = create_app(disable_scheduler=True)
     app.dependency_overrides[get_db] = lambda: session
     with TestClient(app) as c:
         c.headers.update({"X-API-Key": API_KEY})

@@ -34,7 +34,8 @@ plugins = ["pydantic.mypy"]
 # None of these ship type information (no py.typed, no stub package
 # installed). Only their imports are silenced; our own use of them is
 # still checked as `Any`.
-module = ["yaml", "yaml.*", "serpapi", "serpapi.*", "firecrawl", "firecrawl.*"]
+module = ["yaml", "yaml.*", "serpapi", "serpapi.*", "firecrawl", "firecrawl.*",
+          "apscheduler", "apscheduler.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
