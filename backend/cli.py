@@ -1,7 +1,5 @@
-import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
 
 import typer
 import yaml
@@ -17,31 +15,16 @@ from app.pipeline.extract_signals import ExtractSignalsStage
 from app.pipeline.fetch_reviews import FetchReviewsStage
 from app.pipeline.score import ScoreStage
 from app.pipeline.scrape_site import ScrapeSiteStage
-from app.services.budget import BudgetExceeded, check_budget, spend_usd
+from app.services.budget import spend_usd
 from app.services.export import export_leads
 from app.services.outcomes import record_outcome
 from app.services.rulesets import read_ruleset_definition, read_ruleset_file
+from app.services.run_executor import (
+    Providers, budget_guard, execute_run)
 from app.services.search_plan import build_search_plan
 
 app = typer.Typer()
 CONFIG = Path("config")
-
-
-def _budget_check(run_id: int | None, max_cost: float | None):
-    """A per-business guard for the spending stages.
-
-    `check_budget` used to be called only at stage boundaries. `scrape` is
-    the only stage that spends meaningful cash and it ran to completion
-    once entered, so `--max-cost 0.05` still spent ~$0.60 (I1). Returning
-    None when there is no ceiling keeps the no-limit path free of queries.
-    """
-    if max_cost is None:
-        return None
-
-    def check(session) -> None:
-        check_budget(session, run_id, max_cost)
-
-    return check
 
 
 def _report(report) -> None:
@@ -87,7 +70,7 @@ def discover(vertical: str, state: str | None = None, location: str | None = Non
     with get_session() as s:
         report = DiscoverStage(SerperClient()).discover(
             s, run_id, _plan(vertical, state, location, pages),
-            budget_check=_budget_check(run_id, max_cost))
+            budget_check=budget_guard(run_id, max_cost))
         typer.echo(f"discovered: {report.processed}")
         if report.aborted:
             typer.echo(f"stage aborted: {report.reason}", err=True)
@@ -100,7 +83,7 @@ def scrape(per_segment: int | None = None, run_id: int | None = None,
     n = per_segment or get_settings().stratified_per_segment
     with get_session() as s:
         _report(ScrapeSiteStage(FirecrawlScraper(), per_segment=n)
-                .run(s, run_id, budget_check=_budget_check(run_id, max_cost)))
+                .run(s, run_id, budget_check=budget_guard(run_id, max_cost)))
 
 
 @app.command()
@@ -136,80 +119,43 @@ def run_all(vertical: str, state: str | None = None, location: str | None = None
             ) -> None:
     """Discover -> scrape -> extract -> score -> enrich -> extract -> score.
 
-    Creates a `Run` row up front and threads its id through every stage
-    call so `ApiCall` rows (and therefore `spend_usd`/`check_budget`) can
-    be attributed to this run. If `--max-cost` is given, the budget is
-    checked before each stage AND, inside the two spending stages, before
-    each business/query — so the ceiling can be overshot by at most one
-    business's cost. Checking only at stage boundaries was not enough:
-    `scrape` runs to completion once entered (I1).
+    Creates the `Run` row, then hands off to `execute_run`, which is the
+    same code path the API and the scheduler use. The stage sequence, the
+    budget checks between and inside stages, and the terminal-state
+    handling all live in `app/services/run_executor.py` so there is exactly
+    one implementation of them -- three copies of this control flow is the
+    duplication Plan 1's final review flagged.
 
-    A stage that reports `aborted` (circuit breaker tripped, or the budget
-    ran out mid-stage) stops the run, marks the Run failed and exits
-    non-zero. Businesses that were not reached keep their status, so the
-    run is resumable.
+    The providers are constructed here, from this module's globals, and
+    injected: that keeps the CLI in charge of "which adapters" while the
+    service stays in charge of "which stages, in what order".
     """
     with get_session() as s:
-        run = Run(status="running", source="cli",
+        run = Run(status="queued", source="cli",
                   search_plan={"vertical": vertical, "state": state,
                                "location": location, "pages": pages},
-                  max_cost_usd=max_cost,
-                  created_at=datetime.utcnow(), started_at=datetime.utcnow())
+                  max_cost_usd=max_cost, created_at=datetime.utcnow())
         s.add(run)
         s.commit()
         run_id = run.id
 
-    stages: list[tuple[str, Callable[[], None]]] = [
-        ("discover", lambda: discover(vertical, state, location, pages,
-                                      run_id=run_id, max_cost=max_cost)),
-        ("scrape", lambda: scrape(run_id=run_id, max_cost=max_cost)),
-        ("extract", lambda: extract(run_id=run_id)),
-        ("score", lambda: score(vertical, run_id=run_id)),
-        ("enrich", lambda: enrich(vertical, run_id=run_id)),
-        # The ADR-020 loop: re-derive signals and re-score over the richer,
-        # review-enriched data that `enrich` just fetched.
-        ("extract", lambda: extract(run_id=run_id)),
-        ("score", lambda: score(vertical, run_id=run_id)),
-    ]
+    providers = Providers(search=SerperClient(), scraper=FirecrawlScraper(),
+                          reviews=SerpApiReviewProvider())
+    result = execute_run(run_id, providers=providers,
+                         session_factory=get_session)
 
-    for stage_name, run_stage in stages:
-        with get_session() as s:
-            run_row = s.query(Run).filter_by(id=run_id).one()
-            try:
-                check_budget(s, run_id, run_row.max_cost_usd)
-            except BudgetExceeded as exc:
-                typer.echo(f"budget ceiling reached before '{stage_name}': {exc}",
-                          err=True)
-                run_row.status = "failed"
-                run_row.error = str(exc)
-                run_row.finished_at = datetime.utcnow()
-                s.commit()
-                raise typer.Exit(code=1) from exc
+    for stage_name, report in result.stages:
+        typer.echo(f"{stage_name}: {report}")
 
-        try:
-            run_stage()
-        except Exception:
-            # Any non-budget failure (a real provider error, a bug in a
-            # stage, etc.) must still move the Run to a terminal state --
-            # otherwise it is stranded at status="running" forever with no
-            # finished_at. Unlike the budget-abort path above, this does
-            # NOT convert to a clean typer.Exit: the original exception is
-            # re-raised so it stays visible (traceback and all) rather than
-            # being swallowed into a quiet non-zero exit.
-            with get_session() as s:
-                run_row = s.query(Run).filter_by(id=run_id).one()
-                run_row.status = "failed"
-                run_row.error = f"{stage_name} failed: {traceback.format_exc()[-2000:]}"
-                run_row.finished_at = datetime.utcnow()
-                s.commit()
-            raise
+    if result.status != "complete":
+        # A budget stop or an aborted stage is a failed run, not a quiet
+        # success: exiting 0 here once handed the operator a CSV missing
+        # 90% of its leads (I3). Non-budget crashes never reach this point
+        # -- `execute_run` re-raises them with their traceback intact.
+        typer.echo(result.error or "run failed", err=True)
+        raise typer.Exit(code=1)
 
-    with get_session() as s:
-        run_row = s.query(Run).filter_by(id=run_id).one()
-        run_row.status = "complete"
-        run_row.finished_at = datetime.utcnow()
-        run_row.actual_cost = spend_usd(s, run_id)
-        s.commit()
+    typer.echo(f"run {run_id} complete")
 
 
 @app.command("export")
