@@ -115,16 +115,23 @@ def refresh_stale_businesses(older_than_days: int = 90) -> int:
 
 
 def build_scheduler() -> BackgroundScheduler:
-    """Wire the three recurring jobs. `max_instances=1` on the poller stops a
+    """Wire the four recurring jobs. `max_instances=1` on the poller stops a
     slow run from being started twice while the first is still going.
 
-    `reset_stuck_runs` is deliberately absent: the condition it fixes is
-    created by a process dying, so it is run once from the app's lifespan at
-    startup rather than on a timer.
+    `reset_stuck_runs` is on an hourly timer *as well as* being called once
+    from the app's lifespan at startup. Startup-only was not enough: a
+    process restarting within `max_age_hours` of a run starting skipped
+    that row, and nothing ever looked at it again -- stranded permanently.
+    The hourly job is correct under any topology; the startup call (which
+    passes a cutoff of 0) only makes recovery immediate instead of taking
+    up to an hour.
     """
     scheduler = BackgroundScheduler(timezone="UTC")
     scheduler.add_job(poll_queued_runs, "interval", seconds=30,
                       id="poll_queued_runs", max_instances=1,
+                      coalesce=True, replace_existing=True)
+    scheduler.add_job(reset_stuck_runs, "interval", hours=1,
+                      id="reset_stuck_runs", max_instances=1,
                       coalesce=True, replace_existing=True)
     scheduler.add_job(retry_failed_businesses, "cron", hour=3, minute=0,
                       id="retry_failed_businesses", replace_existing=True)

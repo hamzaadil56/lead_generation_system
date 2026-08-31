@@ -172,9 +172,14 @@ def execute_run(run_id: int, *, providers: Providers | None = None,
             run.started_at = run.started_at or datetime.utcnow()
         s.commit()
 
-    providers = providers or live_providers()
-
     try:
+        # Inside the try, not above it: `live_providers()` constructs the
+        # three paid adapters and can raise (an empty FIRECRAWL_KEY passes
+        # pydantic, then `Firecrawl(api_key="")` raises ValueError). The
+        # Run is already committed as `running` by this point, so a raise
+        # from here with no terminal write strands it -- and a poller
+        # claiming one run every 30 seconds strands all of them, silently.
+        providers = providers or live_providers()
         vertical: str = plan_args["vertical"]
         verticals_cfg = yaml.safe_load((CONFIG / "verticals.yaml").read_text())
         locations_cfg = yaml.safe_load((CONFIG / "locations.yaml").read_text())
@@ -190,11 +195,11 @@ def execute_run(run_id: int, *, providers: Providers | None = None,
         ruleset = read_ruleset_file(ruleset_path)
         ruleset_definition = read_ruleset_definition(ruleset_path)
     except Exception:
-        # The Run has already been flipped to `running` above, so a bad
-        # search_plan (unknown vertical, neither state nor location) must
-        # reach a terminal state here too -- otherwise it is stranded at
-        # `running` forever, which is the exact bug the per-stage handler
-        # below exists to prevent.
+        # The Run has already been flipped to `running` above, so a failed
+        # provider construction or a bad search_plan (unknown vertical,
+        # neither state nor location) must reach a terminal state here too
+        # -- otherwise it is stranded at `running` forever, which is the
+        # exact bug the per-stage handler below exists to prevent.
         error = f"setup failed: {traceback.format_exc()[-2000:]}"
         _terminal(session_factory, run_id, "failed", error)
         raise

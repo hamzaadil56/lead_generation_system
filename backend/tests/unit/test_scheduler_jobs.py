@@ -124,3 +124,36 @@ def test_a_job_never_raises_into_the_scheduler_thread(patched, session, monkeypa
     monkeypatch.setattr(patched, "execute_run", boom)
 
     patched.poll_queued_runs()          # must not raise
+
+
+def test_reset_stuck_runs_with_a_zero_cutoff_requeues_anything_running(
+        patched, session):
+    """What the app's startup call passes.
+
+    Under ADR-010 there is one container with one in-process scheduler, so
+    a freshly started process owns no in-flight runs: anything still
+    `running` at startup is by definition orphaned by the process that
+    died, however recently it started.
+    """
+    session.add(Run(status="running", source="ui", search_plan={},
+                    started_at=datetime.utcnow() - timedelta(seconds=1)))
+    session.commit()
+
+    assert patched.reset_stuck_runs(max_age_hours=0) == 1
+    session.expire_all()
+    assert session.query(Run).one().status == "queued"
+
+
+def test_build_scheduler_registers_reset_stuck_runs_hourly(patched):
+    """`reset_stuck_runs` must also be on a timer, not startup-only.
+
+    Startup-only meant a process restarting within an hour of a run
+    starting skipped that row and nothing ever re-checked it: stranded
+    permanently. The hourly job is correct under any topology; the
+    startup call (cutoff 0) only makes recovery immediate.
+    """
+    jobs = {j.id: j for j in patched.build_scheduler().get_jobs()}
+
+    assert set(jobs) == {"poll_queued_runs", "reset_stuck_runs",
+                         "retry_failed_businesses", "refresh_stale_businesses"}
+    assert str(jobs["reset_stuck_runs"].trigger) == "interval[1:00:00]"

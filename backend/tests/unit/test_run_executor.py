@@ -320,3 +320,34 @@ def test_execute_run_marks_a_bad_search_plan_terminal_instead_of_stranding_it(
     assert reloaded.status == "failed"
     assert reloaded.finished_at is not None
     assert "setup failed" in (reloaded.error or "")
+
+
+def test_execute_run_writes_terminal_state_when_provider_construction_fails(
+        session, queued_run, monkeypatch):
+    """The fourth raise path, found in fix round 1.
+
+    `live_providers()` is called *after* the Run has been committed as
+    `running`. It is reachable: pydantic accepts an empty `FIRECRAWL_KEY`,
+    and `Firecrawl(api_key="")` then raises ValueError. With the call
+    outside every `try`, a scheduler claiming a run every 30 seconds
+    stranded every one of them at `running` with `finished_at=None` and
+    `error=None`, while `/health` stayed green -- exactly the silent
+    degradation the terminal-state rule exists to prevent.
+    """
+    import app.services.run_executor as mod
+
+    def no_providers() -> Providers:
+        raise ValueError("Firecrawl: no API key provided")
+
+    monkeypatch.setattr(mod, "live_providers", no_providers)
+
+    # The exception must still propagate: the caller (and the poller's own
+    # log.exception) has to see it.
+    with pytest.raises(ValueError):
+        execute_run(queued_run.id, session_factory=_factory(session))
+
+    session.expire_all()
+    run = session.query(Run).filter_by(id=queued_run.id).one()
+    assert run.status == "failed"
+    assert run.finished_at is not None
+    assert run.error is not None
