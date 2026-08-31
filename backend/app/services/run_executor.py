@@ -36,6 +36,26 @@ log = structlog.get_logger()
 CONFIG = Path("config")
 
 SessionFactory = Callable[[], AbstractContextManager[Session]]
+# `on_stage` is called with each stage's outcome the moment that stage
+# returns, so a caller can stream progress. The service itself never
+# prints: it has to stay usable from the API and the scheduler, where
+# writing to stdout is wrong.
+StageObserver = Callable[[str, StageReport], None]
+
+__all__ = ["Providers", "RunResult", "RunAlreadyComplete", "SessionFactory",
+           "StageObserver", "budget_guard", "execute_run", "live_providers"]
+
+
+class RunAlreadyComplete(Exception):
+    """Raised when `execute_run` is handed a run that already finished.
+
+    The CLI never hits this -- it creates a fresh `Run` per invocation --
+    but the API and the scheduler both pass an *existing* run_id, so a
+    double-POST, a retry, or an overlapping poll would otherwise flip a
+    `complete` run back to `running` and re-bill all seven stages. Named
+    (rather than a bare ValueError) so those callers can catch exactly
+    this and answer 409 instead of 500.
+    """
 
 
 @dataclass
@@ -105,7 +125,8 @@ def _terminal(session_factory: SessionFactory, run_id: int, status: str,
 
 
 def execute_run(run_id: int, *, providers: Providers | None = None,
-                session_factory: SessionFactory = get_session) -> RunResult:
+                session_factory: SessionFactory = get_session,
+                on_stage: StageObserver | None = None) -> RunResult:
     """Run every stage for `run_id`, in order, under its budget ceiling.
 
     Discover -> scrape -> extract -> score -> enrich -> extract -> score.
@@ -120,14 +141,30 @@ def execute_run(run_id: int, *, providers: Providers | None = None,
     A stage that reports `aborted` (circuit breaker tripped, or the budget
     ran out mid-stage) stops the run and marks the Run failed. Businesses
     that were not reached keep their status, so the run is resumable.
+
+    `on_stage`, if given, is called with `(stage_name, report)` as each
+    stage finishes -- before the next one starts and before any failure
+    unwinds -- so a caller can stream progress and still see which stages
+    succeeded when a later one crashes.
+
+    A `complete` run is refused with `RunAlreadyComplete` before anything
+    is written or spent. `running` is *allowed*: the scheduler claims a run
+    by flipping queued->running before calling in, so refusing it would
+    deadlock the poller. `queued` (the CLI) and `failed` (a deliberate
+    operator retry, which resumes from the businesses' statuses rather
+    than restarting) are allowed too.
     """
-    providers = providers or live_providers()
     settings = get_settings()
 
     with session_factory() as s:
         run = s.query(Run).filter_by(id=run_id).one_or_none()
         if run is None:
             raise ValueError(f"no such run: {run_id}")
+        if run.status == "complete":
+            # Refused before the status write and before a single provider
+            # call: re-executing a finished run re-bills every stage.
+            raise RunAlreadyComplete(
+                f"run {run_id} is already complete; refusing to re-execute it")
         plan_args: dict[str, Any] = dict(run.search_plan)
         ceiling = run.max_cost_usd
         if run.status != "running":
@@ -135,16 +172,32 @@ def execute_run(run_id: int, *, providers: Providers | None = None,
             run.started_at = run.started_at or datetime.utcnow()
         s.commit()
 
-    vertical: str = plan_args["vertical"]
-    verticals_cfg = yaml.safe_load((CONFIG / "verticals.yaml").read_text())
-    locations_cfg = yaml.safe_load((CONFIG / "locations.yaml").read_text())
-    plan = build_search_plan(vertical, plan_args.get("state"),
-                             plan_args.get("location"),
-                             verticals_cfg, locations_cfg,
-                             pages_per_query=plan_args.get("pages") or 5)
-    ruleset_path = CONFIG / "rulesets" / f"{verticals_cfg[vertical]['ruleset']}.yaml"
-    ruleset = read_ruleset_file(ruleset_path)
-    ruleset_definition = read_ruleset_definition(ruleset_path)
+    providers = providers or live_providers()
+
+    try:
+        vertical: str = plan_args["vertical"]
+        verticals_cfg = yaml.safe_load((CONFIG / "verticals.yaml").read_text())
+        locations_cfg = yaml.safe_load((CONFIG / "locations.yaml").read_text())
+        plan = build_search_plan(
+            vertical, plan_args.get("state"), plan_args.get("location"),
+            verticals_cfg, locations_cfg,
+            # `.get("pages", 5)` and not `... or 5`: `pages: 0` is a
+            # legitimate instruction to search nothing, and `or` would
+            # silently turn it into five pages per query.
+            pages_per_query=plan_args.get("pages", 5))
+        ruleset_path = (CONFIG / "rulesets"
+                        / f"{verticals_cfg[vertical]['ruleset']}.yaml")
+        ruleset = read_ruleset_file(ruleset_path)
+        ruleset_definition = read_ruleset_definition(ruleset_path)
+    except Exception:
+        # The Run has already been flipped to `running` above, so a bad
+        # search_plan (unknown vertical, neither state nor location) must
+        # reach a terminal state here too -- otherwise it is stranded at
+        # `running` forever, which is the exact bug the per-stage handler
+        # below exists to prevent.
+        error = f"setup failed: {traceback.format_exc()[-2000:]}"
+        _terminal(session_factory, run_id, "failed", error)
+        raise
 
     budget_check = budget_guard(run_id, ceiling)
 
@@ -212,6 +265,11 @@ def execute_run(run_id: int, *, providers: Providers | None = None,
             raise
 
         result.stages.append((name, report))
+        if on_stage is not None:
+            # Reported here, not after the loop: on the re-raise path a
+            # buffered summary is lost entirely, which is precisely when
+            # the operator most needs to know how far the run got.
+            on_stage(name, report)
 
         if report.aborted:
             # `StageReport.aborted` was once echoed and then ignored: a

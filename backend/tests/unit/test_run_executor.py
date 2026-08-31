@@ -25,7 +25,8 @@ from app.clients.fakes import FakeReviewProvider, FakeSearchProvider, FakeWebScr
 from app.models.business import Business
 from app.models.derived import ApiCall, Score
 from app.models.run import Run
-from app.services.run_executor import Providers, execute_run
+from app.services.run_executor import (
+    Providers, RunAlreadyComplete, execute_run)
 
 
 @pytest.fixture
@@ -142,3 +143,162 @@ def test_execute_run_raises_for_an_unknown_run_id(session, providers):
     with pytest.raises(ValueError, match="no such run"):
         execute_run(999999, providers=providers,
                     session_factory=_factory(session))
+
+
+# --- Fix round 1, Finding 1: re-entry -------------------------------------
+
+def test_execute_run_refuses_to_re_execute_a_complete_run(
+        session, queued_run, providers):
+    """The CLI creates a fresh Run each time, but the API and the scheduler
+    both pass an existing run_id -- a double-POST or an overlapping poll
+    would otherwise flip a finished run back to `running` and re-bill all
+    seven stages."""
+    queued_run.status = "complete"
+    queued_run.finished_at = datetime.utcnow()
+    session.commit()
+
+    with pytest.raises(RunAlreadyComplete):
+        execute_run(queued_run.id, providers=providers,
+                    session_factory=_factory(session))
+
+    # Refused before anything ran, not merely after the fact.
+    assert providers.search.calls == []
+    assert providers.scraper.calls == []
+    session.expire_all()
+    run = session.query(Run).filter_by(id=queued_run.id).one()
+    assert run.status == "complete"
+
+
+def test_execute_run_allows_a_run_already_marked_running(
+        session, queued_run, providers):
+    """Task 10's scheduler claims a run by flipping queued->running BEFORE
+    calling execute_run. Refusing `running` would deadlock the poller."""
+    queued_run.status = "running"
+    queued_run.started_at = datetime.utcnow()
+    session.commit()
+
+    result = execute_run(queued_run.id, providers=providers,
+                         session_factory=_factory(session))
+
+    assert result.status == "complete"
+    assert providers.search.calls != []
+
+
+def test_execute_run_allows_an_operator_to_retry_a_failed_run(
+        session, queued_run, providers):
+    """A failed run is resumable: the businesses' statuses make the retry
+    continue rather than start over."""
+    queued_run.status = "failed"
+    queued_run.error = "discover failed: boom"
+    queued_run.finished_at = datetime.utcnow()
+    session.commit()
+
+    result = execute_run(queued_run.id, providers=providers,
+                         session_factory=_factory(session))
+
+    assert result.status == "complete"
+    session.expire_all()
+    run = session.query(Run).filter_by(id=queued_run.id).one()
+    assert run.status == "complete"
+    assert run.error is None
+
+
+def test_execute_run_still_runs_a_queued_run(session, queued_run, providers):
+    assert queued_run.status == "queued"
+
+    result = execute_run(queued_run.id, providers=providers,
+                         session_factory=_factory(session))
+
+    assert result.status == "complete"
+
+
+# --- Fix round 1, Finding 2: pages=0 --------------------------------------
+
+def test_execute_run_treats_pages_zero_as_search_nothing(session, providers):
+    """`pages: 0` means zero pages per query. `.get("pages") or 5` swallowed
+    the 0 and searched five pages of every query instead."""
+    run = Run(status="queued", source="ui",
+              search_plan={"vertical": "hvac", "state": None,
+                           "location": "Houston, TX", "pages": 0})
+    session.add(run)
+    session.commit()
+
+    result = execute_run(run.id, providers=providers,
+                         session_factory=_factory(session))
+
+    assert result.status == "complete"
+    assert providers.search.calls == []
+
+
+def test_execute_run_defaults_to_five_pages_when_pages_is_absent(
+        session, providers):
+    run = Run(status="queued", source="ui",
+              search_plan={"vertical": "hvac", "state": None,
+                           "location": "Houston, TX"})
+    session.add(run)
+    session.commit()
+
+    execute_run(run.id, providers=providers, session_factory=_factory(session))
+
+    # The ceiling is 5 pages per query, but the Houston fixture returns an
+    # empty page 2, which stops DiscoverStage's page walk -- so the
+    # observable proof that the default is neither 0 nor 1 is that each of
+    # the 4 search terms was asked for a second page.
+    assert {page for _, page in providers.search.calls} == {1, 2}
+    assert len(providers.search.calls) == 8
+
+
+# --- Fix round 1, Finding 3: streaming stage outcomes ---------------------
+
+def test_execute_run_reports_each_stage_as_it_completes(
+        session, queued_run, providers):
+    seen: list[str] = []
+    execute_run(queued_run.id, providers=providers,
+                session_factory=_factory(session),
+                on_stage=lambda name, report: seen.append(name))
+
+    assert seen == ["discover", "scrape", "extract", "score", "enrich",
+                    "extract", "score"]
+
+
+def test_execute_run_reports_completed_stages_before_a_later_stage_crashes(
+        session, queued_run, providers, monkeypatch):
+    """The stages that succeeded must already have been reported by the
+    time the crash unwinds -- a summary buffered until `execute_run`
+    returns is lost entirely on the re-raise path."""
+    class BoomExtract:
+        def run(self, *a, **k):
+            raise RuntimeError("extract exploded")
+
+    monkeypatch.setattr("app.services.run_executor.ExtractSignalsStage",
+                        BoomExtract)
+    seen: list[str] = []
+
+    with pytest.raises(RuntimeError, match="extract exploded"):
+        execute_run(queued_run.id, providers=providers,
+                    session_factory=_factory(session),
+                    on_stage=lambda name, report: seen.append(name))
+
+    assert seen == ["discover", "scrape"]
+
+
+def test_execute_run_marks_a_bad_search_plan_terminal_instead_of_stranding_it(
+        session, providers):
+    """The Run is flipped to `running` before the plan is built, so a plan
+    that cannot be built must still reach a terminal state -- same reason
+    the per-stage handler exists."""
+    run = Run(status="queued", source="ui",
+              search_plan={"vertical": "hvac", "state": None,
+                           "location": None, "pages": 1})
+    session.add(run)
+    session.commit()
+
+    with pytest.raises(ValueError, match="state or location"):
+        execute_run(run.id, providers=providers,
+                    session_factory=_factory(session))
+
+    session.expire_all()
+    reloaded = session.query(Run).filter_by(id=run.id).one()
+    assert reloaded.status == "failed"
+    assert reloaded.finished_at is not None
+    assert "setup failed" in (reloaded.error or "")

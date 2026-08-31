@@ -10,6 +10,7 @@ from app.clients.serper import SerperClient
 from app.core.config import get_settings
 from app.core.db import get_session
 from app.models.run import Run
+from app.pipeline.base import StageReport
 from app.pipeline.discover import DiscoverStage
 from app.pipeline.extract_signals import ExtractSignalsStage
 from app.pipeline.fetch_reviews import FetchReviewsStage
@@ -141,11 +142,21 @@ def run_all(vertical: str, state: str | None = None, location: str | None = None
 
     providers = Providers(search=SerperClient(), scraper=FirecrawlScraper(),
                           reviews=SerpApiReviewProvider())
-    result = execute_run(run_id, providers=providers,
-                         session_factory=get_session)
 
-    for stage_name, report in result.stages:
+    def echo_stage(stage_name: str, report: StageReport) -> None:
+        """Stream each stage's outcome as it lands.
+
+        Printing from a `result.stages` loop after `execute_run` returned
+        buffered the whole run's feedback -- and lost it completely when a
+        stage crashed and the exception was re-raised, which is exactly
+        when the operator needs to know which stages got through. The
+        service never prints; it calls back, so the API and the scheduler
+        can do something else with the same events.
+        """
         typer.echo(f"{stage_name}: {report}")
+
+    result = execute_run(run_id, providers=providers,
+                         session_factory=get_session, on_stage=echo_stage)
 
     if result.status != "complete":
         # A budget stop or an aborted stage is a failed run, not a quiet

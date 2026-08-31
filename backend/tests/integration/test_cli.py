@@ -254,3 +254,37 @@ def test_export_threads_the_ruleset_version_from_the_cli(cli_env, tmp_path):
     assert result.exit_code == 0, result.output
     assert "hvac_v1" in result.output
     assert len(list(csv.DictReader(out.open(encoding="utf-8")))) > 0
+
+
+class _BoomExtractStage:
+    """Stands in for ExtractSignalsStage, the third stage in the sequence."""
+
+    def run(self, *args, **kwargs):
+        raise RuntimeError("boom: extract exploded")
+
+
+def test_run_all_reports_completed_stages_before_a_later_stage_crashes(
+        cli_env, monkeypatch):
+    """Fix round 1, finding 3: stage results were buffered until
+    `execute_run` returned and were therefore lost entirely on the
+    re-raise path -- exactly when the operator most needs to know which
+    stages got through before the crash."""
+    monkeypatch.setattr("app.services.run_executor.ExtractSignalsStage",
+                        _BoomExtractStage)
+
+    result = _invoke_run_all()
+
+    assert isinstance(result.exception, RuntimeError)
+    # The two stages that finished were reported as they landed.
+    assert "discover:" in result.output
+    assert "scrape:" in result.output
+    # The one that blew up was not.
+    assert "extract:" not in result.output
+
+
+def test_run_all_streams_every_stage_outcome_on_a_clean_run(cli_env):
+    result = _invoke_run_all()
+    assert result.exit_code == 0, result.output
+
+    for stage_name in ("discover", "scrape", "extract", "score", "enrich"):
+        assert f"{stage_name}:" in result.output
