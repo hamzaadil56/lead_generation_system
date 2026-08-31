@@ -376,3 +376,47 @@ def test_execute_run_writes_terminal_state_when_the_progress_observer_raises(
     assert run.status == "failed"
     assert run.finished_at is not None
     assert run.error is not None
+
+
+def test_a_completed_run_records_per_stage_stats(session, queued_run, providers):
+    """I4: `Run.stats` was in the API contract and nothing ever wrote it.
+    `GET /runs/{id}` returned `"stats": null` for every run, forever, and
+    the model comment claiming it is "only written on completion" was
+    false as documentation.
+
+    `RunResult` already carries a `StageReport` per stage, so the counts
+    exist; they were just discarded when the run reached its terminal
+    state. Both `extract` and `score` appear twice (the ADR-020 enrichment
+    loop), so the per-stage record has to be an ordered list, not a dict
+    keyed by stage name -- a dict would silently drop the first pass.
+    """
+    execute_run(queued_run.id, providers=providers,
+                session_factory=_factory(session))
+
+    session.expire_all()
+    stats = session.query(Run).filter_by(id=queued_run.id).one().stats
+
+    assert stats is not None
+    assert [s["stage"] for s in stats["stages"]] == [
+        "discover", "scrape", "extract", "score", "enrich", "extract", "score"]
+    assert stats["processed"] == sum(s["processed"] for s in stats["stages"])
+    assert stats["processed"] > 0
+    assert stats["failed"] == 0
+    assert all(s["aborted"] is False for s in stats["stages"])
+
+
+def test_a_failed_run_records_the_stages_that_did_run(session, providers,
+                                                      queued_run):
+    """Stats on the failure path are the more useful half: they say how far
+    the run got before the ceiling stopped it."""
+    session.query(Run).filter_by(id=queued_run.id).update({"max_cost_usd": 0.0})
+    session.commit()
+
+    result = execute_run(queued_run.id, providers=providers,
+                         session_factory=_factory(session))
+
+    assert result.status == "failed"
+    session.expire_all()
+    run = session.query(Run).filter_by(id=queued_run.id).one()
+    assert run.stats is not None
+    assert [s["stage"] for s in run.stats["stages"]] == ["discover"]

@@ -11,7 +11,6 @@ from app.repositories.runs import get_run, list_runs
 from app.schemas.common import Page
 from app.schemas.runs import PreviewOut, RunCreate, RunOut
 from app.services.preview import preview_search_plan
-from app.services.search_plan import build_search_plan
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 CONFIG = Path("config")
@@ -29,26 +28,35 @@ def create_run(body: RunCreate, db: Session = Depends(get_db)) -> RunOut:
     Deliberately does not execute inline: a full run takes minutes, which no
     HTTP client or proxy will hold open.
 
-    The plan is built and thrown away: this endpoint stores the *request*,
-    and `execute_run` rebuilds the plan at execution time. Building it here
-    is validation, and it has to be the same call preview makes. Create
-    used to check only the vertical, so `{"vertical":"hvac","state":"ZZ"}`
-    returned 201 while `POST /runs/preview` -- three lines below, same
-    body -- returned 400; the queued run was then claimed ~30 seconds
-    later and landed `failed` with a stored traceback (I2). Validating
-    through `build_search_plan` rather than re-implementing the checks
-    here is the point: queue time was the third caller of that function
-    and the only one not using it.
+    The plan is resolved and thrown away: this endpoint stores the
+    *request*, and `execute_run` rebuilds the plan at execution time.
+    Resolving it here is validation, and it has to be the same path
+    preview takes. Create used to check only the vertical, so
+    `{"vertical":"hvac","state":"ZZ"}` returned 201 while
+    `POST /runs/preview` -- three lines below, same body -- returned 400;
+    the queued run was then claimed ~30 seconds later and landed `failed`
+    with a stored traceback (I2). Going through `build_search_plan`
+    (here, via the preview service) rather than re-implementing the checks
+    is the point: queue time was the third caller of that function and the
+    only one not using it.
     """
     verticals_cfg, locations_cfg = _configs()
-    build_search_plan(body.vertical, body.state, body.location,
-                      verticals_cfg, locations_cfg,
-                      pages_per_query=body.pages)
+    # One call does both jobs. It raises `SearchPlanError` (-> 400) on an
+    # unknown vertical or state, and it returns the estimate the confirm
+    # screen shows -- which `create_run` used to recompute the configs for
+    # and then throw away, leaving `Run.estimated_cost` null forever and
+    # the estimate-vs-actual comparison the column exists for impossible
+    # (I4). It reads only: `preview_search_plan` cannot reach a provider.
+    preview = preview_search_plan(db, body.vertical, body.state,
+                                  body.location, body.pages, verticals_cfg,
+                                  locations_cfg)
 
     run = Run(status="queued", source="ui",
               search_plan={"vertical": body.vertical, "state": body.state,
                            "location": body.location, "pages": body.pages},
-              max_cost_usd=body.max_cost_usd, created_at=datetime.utcnow())
+              max_cost_usd=body.max_cost_usd,
+              estimated_cost=preview.estimated_cost_usd,
+              created_at=datetime.utcnow())
     db.add(run)
     db.commit()
     db.refresh(run)

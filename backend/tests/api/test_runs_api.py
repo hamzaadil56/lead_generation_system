@@ -168,3 +168,22 @@ def test_post_runs_and_preview_agree_on_every_plan_input(client):
         assert (created.status_code < 400) == (previewed.status_code < 400), (
             f"create and preview disagree on {body}: "
             f"{created.status_code} vs {previewed.status_code}")
+
+
+def test_post_runs_persists_the_cost_estimate_the_preview_computed(client,
+                                                                   session):
+    """I4: `POST /runs/preview` computes a real estimate the user acts on,
+    and `POST /runs` -- validating the same plan from the same configs --
+    threw it away. `Run.estimated_cost` was in the API contract, always
+    null, so the estimate-vs-actual comparison the column exists for could
+    never be made and the Runs screen rendered a permanent blank.
+    """
+    body = {"vertical": "hvac", "state": "TX", "pages": 2}
+    expected = client.post("/runs/preview", json=body).json()["estimated_cost_usd"]
+
+    created = client.post("/runs", json=body)
+
+    assert created.status_code == 201
+    assert created.json()["estimated_cost"] == expected > 0
+    assert session.query(Run).filter_by(
+        id=created.json()["id"]).one().estimated_cost == expected

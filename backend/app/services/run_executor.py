@@ -107,13 +107,36 @@ def budget_guard(run_id: int | None, max_cost: float | None
     return check
 
 
+def _stage_stats(result: "RunResult") -> dict[str, Any]:
+    """The end-of-run counts for `Run.stats`.
+
+    An ordered LIST of stages, not a dict keyed by stage name: `extract`
+    and `score` each run twice (the ADR-020 enrichment loop), and a dict
+    would silently drop the pre-enrichment pass -- the one whose counts
+    differ. Totals are derived here rather than stored twice.
+    """
+    stages = [{"stage": name, "processed": report.processed,
+               "failed": report.failed, "aborted": report.aborted,
+               "reason": report.reason}
+              for name, report in result.stages]
+    return {"stages": stages,
+            "processed": sum(s["processed"] for s in stages),
+            "failed": sum(s["failed"] for s in stages)}
+
+
 def _terminal(session_factory: SessionFactory, run_id: int, status: str,
-              error: str | None) -> None:
+              error: str | None, stats: dict[str, Any] | None = None) -> None:
     """Move the Run to a terminal state.
 
     Called on every exit path. A run stranded at status="running" with no
     `finished_at` is invisible to monitoring and can never be reconciled --
     that was the round-2 review finding this function exists to prevent.
+
+    `stats` is written here and only here, because this is the one place
+    every terminal path passes through. It is `None` only on the setup
+    failure, where no stage has run and there is nothing to count; the
+    failure paths carry the counts for the stages that DID run, which is
+    the more useful half (how far did the run get before it stopped).
     """
     with session_factory() as s:
         run = s.query(Run).filter_by(id=run_id).one()
@@ -121,6 +144,8 @@ def _terminal(session_factory: SessionFactory, run_id: int, status: str,
         run.error = error
         run.finished_at = datetime.utcnow()
         run.actual_cost = spend_usd(s, run_id)
+        if stats is not None:
+            run.stats = stats
         s.commit()
 
 
@@ -271,7 +296,8 @@ def execute_run(run_id: int, *, providers: Providers | None = None,
                         reason=str(exc))
             result.status = "failed"
             result.error = f"budget ceiling reached before '{name}': {exc}"
-            _terminal(session_factory, run_id, "failed", result.error)
+            _terminal(session_factory, run_id, "failed", result.error,
+                      _stage_stats(result))
             return result
         except Exception:
             # Any non-budget failure (a real provider error, a bug in a
@@ -282,7 +308,8 @@ def execute_run(run_id: int, *, providers: Providers | None = None,
             # so it stays visible (traceback and all) rather than being
             # swallowed into a quiet non-zero exit.
             error = f"{name} failed: {traceback.format_exc()[-2000:]}"
-            _terminal(session_factory, run_id, "failed", error)
+            _terminal(session_factory, run_id, "failed", error,
+                      _stage_stats(result))
             raise
 
         if report.aborted:
@@ -294,8 +321,9 @@ def execute_run(run_id: int, *, providers: Providers | None = None,
                       reason=report.reason)
             result.status = "failed"
             result.error = f"stage aborted: {report.reason}"
-            _terminal(session_factory, run_id, "failed", result.error)
+            _terminal(session_factory, run_id, "failed", result.error,
+                      _stage_stats(result))
             return result
 
-    _terminal(session_factory, run_id, "complete", None)
+    _terminal(session_factory, run_id, "complete", None, _stage_stats(result))
     return result
