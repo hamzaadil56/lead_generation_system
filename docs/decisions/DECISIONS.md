@@ -651,3 +651,29 @@ elements. `royalair` is the deliberate negative case (no chat, no ads).
   Tracked, not scored, which was already the decision in ADR-021.
 - Fingerprints are metro- and vertical-specific. Re-run this capture when
   adding a vertical or a very different market.
+
+---
+
+## ADR-024 — A read-only `repositories/` layer, for the API only
+
+**Context.** The spec's dependency rule is `api -> services -> repositories
+-> database`, but Plan 1 built no repositories: each pipeline stage queries
+the session directly. Adding the layer now meant either refactoring five
+reviewed, working stages or leaving the codebase with two data-access styles.
+
+**Decision.** Introduce `app/repositories/` for the API's **read** paths
+only — filtered, paginated queries the UI needs. The pipeline's
+stage-scoped writes stay exactly as they are. `repositories/` never writes,
+and `app/pipeline/` never imports it.
+
+**Why.** The two have genuinely different shapes. A stage reads "every row
+in status X" and writes it forward; the API reads "page 3 of go_now leads in
+Texas, sorted by fit x pain". Forcing both through one abstraction would
+serve neither. The alternative — refactoring the pipeline — would rewrite
+the data access of code that had just passed review, with 181 tests to
+rework, for no behavioural gain.
+
+**Consequences.** Two data-access styles coexist, which is a real cost and
+is why this ADR exists rather than a silent convention. An `import-linter`
+contract enforces the split so it cannot erode. If the pipeline ever needs a
+filtered read, that is the signal to revisit.
