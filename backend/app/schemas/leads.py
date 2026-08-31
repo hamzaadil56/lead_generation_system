@@ -4,13 +4,31 @@ from pydantic import BaseModel, ConfigDict
 
 
 class ReasonOut(BaseModel):
-    """One rule's contribution, straight from Score.reasons."""
-    id: str
-    label: str
+    """One rule's contribution, straight from `Score.reasons`.
+
+    These field names mirror `app.domain.rules.models.RuleReason` EXACTLY,
+    because `ScoreStage` persists `asdict(RuleReason)` verbatim
+    (`app/pipeline/score.py`) and this model is constructed with
+    `ReasonOut(**row)` over that JSON. The pipeline is merged, reviewed
+    code and `app/services/export.py` already reads the same keys; the
+    schema is the side that has to match.
+
+    It did not: this model declared `id` (a rename of `rule`) and
+    `applicable` (invented -- the engine drops non-applicable rules before
+    building a reason, `app/domain/rules/engine.py`, so the key has never
+    been persisted). Every `GET /leads/{cid}` for a scored business raised
+    a pydantic ValidationError. Do not rename a field here without
+    changing what the scorer writes; the guard is
+    `tests/integration/test_end_to_end.py::
+    test_the_lead_detail_api_can_read_the_reasons_the_scorer_writes`,
+    which scores real rows and reads them back through the repository.
+    """
+    rule: str
     track: str
-    points: int
     matched: bool
-    applicable: bool
+    points: int
+    label: str
+    evidence: list[str] | None = None
 
 
 class ScoreOut(BaseModel):

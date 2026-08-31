@@ -65,3 +65,45 @@ def test_pipeline_is_idempotent_when_rerun(session):
     assert scrapers[1].calls == [], (
         "re-running the pipeline re-billed Firecrawl for "
         f"{len(scrapers[1].calls)} more scrapes")
+
+
+def test_the_lead_detail_api_can_read_the_reasons_the_scorer_writes(session):
+    """The one test that spans the two sides of `Score.reasons`.
+
+    `ScoreStage` persists `asdict(RuleReason)` -- keys `rule/track/matched/
+    points/label/evidence`. `get_lead_detail` re-reads that JSON into
+    `ReasonOut`. Nothing else in the suite ran the writer and the reader
+    against the same rows, so `ReasonOut` was free to declare a shape
+    (`id`, `applicable`) the pipeline has never written: every scored lead
+    detail raised a pydantic ValidationError, which the app-level
+    ValueError handler then rendered as a 400.
+
+    Reading back through the repository -- not a hand-built fixture -- is
+    the whole point: a fixture that invents its own dict cannot catch a
+    contract mismatch.
+    """
+    from app.repositories.leads import get_lead_detail
+
+    DiscoverStage(FakeSearchProvider()).discover(session, None, PLAN)
+    ScrapeSiteStage(FakeWebScraper(), per_segment=5).run(session, None)
+    ExtractSignalsStage().run(session, None)
+    ScoreStage(RULESET).run(session, None)
+
+    # Filtered in Python: Postgres has no `json <> json` operator.
+    scored = [s for s in session.query(Score).all() if s.reasons]
+    assert scored, "the scorer wrote no reasons; this test would prove nothing"
+
+    for score in scored:
+        business = session.query(Business).filter_by(id=score.business_id).one()
+        detail = get_lead_detail(session, business.cid,
+                                 ruleset_version=RULESET.version)
+        assert detail is not None
+        assert len(detail.reasons) == len(score.reasons)
+        # Field for field against what the engine actually persisted.
+        for out, raw in zip(detail.reasons, score.reasons):
+            assert out.rule == raw["rule"]
+            assert out.track == raw["track"]
+            assert out.matched == raw["matched"]
+            assert out.points == raw["points"]
+            assert out.label == raw["label"]
+            assert out.evidence == raw["evidence"]

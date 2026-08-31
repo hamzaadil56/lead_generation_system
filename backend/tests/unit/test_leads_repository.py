@@ -1,9 +1,22 @@
+from dataclasses import asdict
 from datetime import datetime
 
+from app.domain.rules.models import RuleReason
 from app.models.business import Business, BusinessStatus
 from app.models.derived import Review, Score, Signals
 from app.models.manual import Outcome
 from app.repositories.leads import LeadFilters, get_lead_detail, list_leads
+
+# Built from the engine's own dataclass, then `asdict`-ed exactly the way
+# `ScoreStage` persists it. This fixture previously hand-wrote a dict using
+# the *schema's* field names (`id`, `applicable`) -- a shape the pipeline
+# has never produced -- so it confirmed only that the repository could
+# unpack the test's own invention, and the real contract mismatch (every
+# scored `GET /leads/{cid}` returned 400) went undetected. A fixture that
+# invents its own input shape cannot catch a contract mismatch.
+REASONS = [asdict(RuleReason(
+    rule="uses_fsm", track="fit", matched=True, points=30,
+    label="Uses field service software", evidence=None))]
 
 
 def _business(session, cid, name, *, state="TX", fit=80, pain=70,
@@ -16,10 +29,7 @@ def _business(session, cid, name, *, state="TX", fit=80, pain=70,
     session.flush()
     session.add(Score(business_id=b.id, ruleset_version="hvac_v1",
                       fit_score=fit, pain_score=pain, quadrant=quadrant,
-                      coverage=0.8, reasons=[
-                          {"id": "uses_fsm", "label": "Uses field service software",
-                           "track": "fit", "points": 30, "matched": True,
-                           "applicable": True}]))
+                      coverage=0.8, reasons=REASONS))
     session.commit()
     return b
 
@@ -106,7 +116,9 @@ def test_get_lead_detail_returns_reasons_signals_and_evidence(session):
     assert detail is not None
     assert detail.lead.name == "Detailed Air"
     assert detail.score is not None and detail.score.fit_score == 80
-    assert [r.id for r in detail.reasons] == ["uses_fsm"]
+    assert [r.rule for r in detail.reasons] == ["uses_fsm"]
+    # Every key the scorer writes must survive the round trip, not just the id.
+    assert detail.reasons[0].model_dump() == REASONS[0]
     assert detail.signals["closes_before_6pm"] is True
     assert detail.signals["has_chat_widget"] is False
     assert [e.text for e in detail.evidence] == ["nobody ever answers"]
