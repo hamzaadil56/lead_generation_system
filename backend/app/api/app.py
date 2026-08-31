@@ -73,8 +73,25 @@ def create_app(*, disable_scheduler: bool = False) -> FastAPI:
     started inside the tests would claim queued runs and execute them
     against the real, paid providers.
     """
+    # No `/openapi.json`, `/docs`, `/docs/oauth2-redirect` or `/redoc`:
+    # spec section 9 says the API is never publicly browsable, and these
+    # four were the only routes that broke it -- an anonymous caller got
+    # the complete route inventory, every request/response schema, and the
+    # field names of the internal DTOs (I3). Nothing leaked data, but the
+    # schema is the map for attacking everything that does.
+    #
+    # Disabled outright rather than gated on `require_api_key`: Swagger UI
+    # fetches `/openapi.json` from the browser and cannot attach an
+    # `X-API-Key` header, so "docs behind auth" is a broken page that
+    # still depends on a second thing being configured right. A route that
+    # is not registered cannot be misconfigured. The single consumer is a
+    # Next.js server holding the key server-side; it needs the JSON
+    # contract at build time, which `app.openapi()` still produces
+    # in-process (and which the auth sweep in
+    # tests/api/test_health_and_auth.py uses).
     app = FastAPI(title="Lead Generation API", version="1.0.0",
-                  lifespan=lifespan)
+                  lifespan=lifespan,
+                  openapi_url=None, docs_url=None, redoc_url=None)
     app.state.disable_scheduler = disable_scheduler
 
     @app.get("/health")
