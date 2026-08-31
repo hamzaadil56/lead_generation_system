@@ -394,3 +394,29 @@ def test_reset_stuck_runs_defaults_to_a_conservative_cutoff(
     assert result.exit_code == 0, result.output
     cli_env.expire_all()
     assert cli_env.query(Run).one().status == "running"
+
+
+def test_run_all_creates_no_run_row_when_a_provider_cannot_be_built(
+        cli_env, monkeypatch):
+    """A consequence of creating the run as `running` (C2 fix (a)).
+
+    `run-all` constructs its three provider clients itself, and that can
+    raise before `execute_run` is ever called -- an empty FIRECRAWL_KEY
+    passes pydantic and then `Firecrawl(api_key="")` raises. While the row
+    was created `queued`, such a failure left a row the API's poller
+    eventually claimed and terminated; created `running`, the same
+    failure would strand it at `running` with no `finished_at` forever,
+    which is the one thing `execute_run` is built never to do.
+
+    So the providers are built BEFORE the row. No row, nothing stranded,
+    and no terminal-state handling outside `run_executor`.
+    """
+    def boom():
+        raise ValueError("firecrawl: api_key is required")
+
+    monkeypatch.setattr(cli, "FirecrawlScraper", boom)
+
+    result = _invoke_run_all()
+
+    assert result.exit_code != 0
+    assert cli_env.query(Run).count() == 0

@@ -132,13 +132,24 @@ def run_all(vertical: str, state: str | None = None, location: str | None = None
     injected: that keeps the CLI in charge of "which adapters" while the
     service stays in charge of "which stages, in what order".
     """
+    # Built BEFORE the Run row, deliberately. These constructors can raise
+    # (an empty FIRECRAWL_KEY passes pydantic, then `Firecrawl(api_key="")`
+    # raises), and the row below is created `running`: a raise after it
+    # would strand a run at `running` with no `finished_at` forever, the
+    # one outcome `execute_run` is built to prevent. Constructing first
+    # means a bad key produces no row at all, and no terminal-state
+    # handling has to exist outside `run_executor`.
+    providers = Providers(search=SerperClient(), scraper=FirecrawlScraper(),
+                          reviews=SerpApiReviewProvider())
+
     with get_session() as s:
         # Created `running`, with `started_at`, in the SAME transaction --
         # never `queued`. The CLI executes the run itself moments later,
         # but the API container's poller filters on `status == "queued"`,
-        # so a row committed as `queued` was claimable during the gap
-        # between this commit and `execute_run` below (three provider
-        # clients get constructed in between). ADR-017 and the Dockerfile
+        # so a row committed as `queued` was claimable during the whole
+        # gap between this commit and `execute_run` below -- which used to
+        # include constructing three provider clients (now done above).
+        # ADR-017 and the Dockerfile
         # document the CLI as a second entrypoint into the same image and
         # database, so that poller is a real process: it would walk all
         # seven stages against this same run_id concurrently -- duplicated
@@ -154,9 +165,6 @@ def run_all(vertical: str, state: str | None = None, location: str | None = None
         s.add(run)
         s.commit()
         run_id = run.id
-
-    providers = Providers(search=SerperClient(), scraper=FirecrawlScraper(),
-                          reviews=SerpApiReviewProvider())
 
     def echo_stage(stage_name: str, report: StageReport) -> None:
         """Stream each stage's outcome as it lands.
