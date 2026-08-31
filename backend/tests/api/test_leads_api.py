@@ -122,3 +122,32 @@ def test_export_of_an_empty_filter_returns_a_header_only_csv(client, leads):
     r = client.get("/leads/export.csv?quadrant=low_fit")
     assert r.status_code == 200
     assert len(r.text.strip().splitlines()) == 1
+
+
+def test_a_broken_reason_row_is_a_500_not_a_400(crashing_client, session):
+    """I1: the app-level `ValueError` handler used to catch
+    `pydantic.ValidationError`, which subclasses `ValueError`.
+
+    Any server-side DTO construction failure was therefore rendered as a
+    400 -- a client error -- with the raw pydantic message in the body:
+    internal field names, type errors, and truncated input values. That is
+    what disguised C1 (`ReasonOut` not matching `Score.reasons`) as a bad
+    request for a year of code review, and it means a monitoring rule on
+    5xx sees nothing while the caller sees internal structure.
+
+    A `Score.reasons` row the schema cannot parse is a bug in this
+    service, so it must be a 500 and must not echo the row.
+    """
+    b = Business(cid="broken", name="Broken Air", status=BusinessStatus.SCORED)
+    session.add(b)
+    session.flush()
+    session.add(Score(business_id=b.id, ruleset_version="hvac_v1",
+                      fit_score=50, pain_score=50, quadrant="cold",
+                      coverage=0.5,
+                      reasons=[{"not_a": "reason", "secret": "leak-me"}]))
+    session.commit()
+
+    r = crashing_client.get("/leads/broken")
+
+    assert r.status_code == 500
+    assert "leak-me" not in r.text

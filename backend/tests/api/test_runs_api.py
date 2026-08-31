@@ -112,3 +112,13 @@ def test_preview_accepts_a_lowercase_or_mixed_case_state(client):
 
     assert lower.status_code == upper.status_code == 200
     assert lower.json()["queries"] == upper.json()["queries"]
+
+
+def test_a_malformed_body_is_still_a_422_not_a_400(client):
+    """FastAPI's own request-validation path must keep working after the
+    app-level handler was narrowed to `SearchPlanError`. `pages` is
+    bounded 1..20 by the schema, and that rejection is a
+    `RequestValidationError` -- never routed through the 400 handler."""
+    r = client.post("/runs", json={"vertical": "hvac",
+                                   "location": "Houston, TX", "pages": 999})
+    assert r.status_code == 422

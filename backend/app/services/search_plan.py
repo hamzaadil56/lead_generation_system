@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+from app.core.errors import SearchPlanError
+
 
 @dataclass(frozen=True)
 class SearchPlan:
@@ -26,16 +28,20 @@ def build_search_plan(vertical: str, state: str | None, location: str | None,
     string handed straight to the provider (Serper resolves it server-side,
     per ADR-021), so it is passed through untouched; only `vertical` and
     `state` are keys into local config files and need to match them.
+
+    Raises `SearchPlanError` (a `ValueError` subclass) rather than a bare
+    `ValueError`, so the API can render exactly these -- and nothing else
+    -- as a 400. See the note on `SearchPlanError`.
     """
     if vertical not in verticals_cfg:
-        raise ValueError(f"unknown vertical: {vertical}")
+        raise SearchPlanError(f"unknown vertical: {vertical}")
     terms = verticals_cfg[vertical]["search_terms"]
     if location:
         locations = [location]
     elif state:
         locations = _resolve_metros(state, locations_cfg)
     else:
-        raise ValueError("one of state or location is required")
+        raise SearchPlanError("one of state or location is required")
     return SearchPlan(vertical, terms, locations, pages_per_query)
 
 
@@ -52,5 +58,5 @@ def _resolve_metros(state: str, locations_cfg: dict) -> list[str]:
     by_lower = {k.lower(): v for k, v in locations_cfg.items()}
     entry = by_lower.get(state.lower())
     if entry is None:
-        raise ValueError(f"unknown state: {state}")
+        raise SearchPlanError(f"unknown state: {state}")
     return entry["metros"]

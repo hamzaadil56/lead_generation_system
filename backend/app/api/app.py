@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from fastapi.requests import Request
 
 from app.api.deps import require_api_key
+from app.core.errors import SearchPlanError
 
 log = structlog.get_logger()
 
@@ -81,10 +82,27 @@ def create_app(*, disable_scheduler: bool = False) -> FastAPI:
         """Unauthenticated on purpose: the container healthcheck calls it."""
         return {"status": "ok"}
 
-    @app.exception_handler(ValueError)
-    def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
-        """A bad vertical or state reaches the router as ValueError from
-        build_search_plan. That is a client mistake, not a 500."""
+    @app.exception_handler(SearchPlanError)
+    def search_plan_error_handler(request: Request,
+                                  exc: SearchPlanError) -> JSONResponse:
+        """An unknown vertical or state reaches the router as a
+        `SearchPlanError` from `build_search_plan`. That is a client
+        mistake, and its message is written by us, so it is safe to echo.
+
+        Registered for `SearchPlanError` and NOT for `ValueError`.
+        `pydantic.ValidationError` subclasses `ValueError`, so the broad
+        handler this replaces turned every server-side DTO construction
+        failure inside a router into a 400 -- a client error -- carrying
+        the raw pydantic message: internal field names, type errors, and
+        truncated input values. It is what let a broken response schema
+        (`ReasonOut` vs `Score.reasons`) read as "the client asked wrong"
+        for two review rounds, and it hid the failure from any monitoring
+        rule watching 5xx. Anything not named here is a 500, deliberately.
+
+        FastAPI's own request-validation path is untouched: a malformed
+        request body is still a 422 raised as `RequestValidationError`,
+        which never reaches this handler.
+        """
         log.warning("api.bad_request", path=request.url.path, error=str(exc))
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 

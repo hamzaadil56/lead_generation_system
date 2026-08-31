@@ -41,6 +41,27 @@ def client(session, monkeypatch):
 
 
 @pytest.fixture
+def crashing_client(session, monkeypatch):
+    """Same wiring as `client`, but an unhandled exception in a router is
+    turned into a 500 response instead of being re-raised into the test.
+
+    Needed to assert what the caller actually sees when a handler raises:
+    with the default `raise_server_exceptions=True` the exception escapes
+    and the response is never rendered.
+    """
+    monkeypatch.setenv("API_KEY", API_KEY)
+    from app.core.config import get_settings
+    get_settings.cache_clear()
+
+    app = create_app(disable_scheduler=True)
+    app.dependency_overrides[get_db] = lambda: session
+    with TestClient(app, raise_server_exceptions=False) as c:
+        c.headers.update({"X-API-Key": API_KEY})
+        yield c
+    get_settings.cache_clear()
+
+
+@pytest.fixture
 def anon_client(client):
     """Same app, no API key header."""
     client.headers.pop("X-API-Key", None)
