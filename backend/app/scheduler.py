@@ -40,11 +40,19 @@ def poll_queued_runs() -> int | None:
         return None
 
 
-def reset_stuck_runs(max_age_hours: int = 1) -> int:
+def reset_stuck_runs(max_age_hours: int = 6) -> int:
     """A run left `running` past the cutoff goes back to `queued`.
 
     Covers the case where the process died mid-run: without this the run is
     stranded and the poller will never look at it again.
+
+    NOT wired to a timer and NOT called at startup. It is reachable only
+    through `python -m cli reset-stuck-runs`, deliberately: requeuing a run
+    that is in fact still executing in another process makes the poller
+    re-claim it and re-bill every stage, and nothing in the schema can tell
+    the two apart (`started_at` is stamped once and never refreshed; there
+    is no heartbeat or owner column). See the docstrings in
+    `build_scheduler` and `app.api.app.lifespan`.
     """
     try:
         cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
@@ -118,17 +126,18 @@ def build_scheduler() -> BackgroundScheduler:
     """Wire the three recurring jobs. `max_instances=1` on the poller stops a
     slow run from being started twice while the first is still going.
 
-    `reset_stuck_runs` is deliberately NOT among them. It was registered on
-    an hourly timer for one round and removed: a timed reconciler cannot
-    tell a run abandoned by a dead process from one still executing in this
-    one. `execute_run` stamps `started_at` once and never refreshes it, so
-    any run still going past the cutoff was flipped back to `queued`
-    mid-flight and the next 30-second poll re-claimed and concurrently
-    re-executed the same run_id -- double billing, two writers on the same
-    rows. Fixing that properly needs a heartbeat column, which is DDL this
-    plan does not have. The startup call in the app's lifespan has no such
-    race and covers the case that matters; see the comment there before
-    re-adding a timer here.
+    `reset_stuck_runs` is deliberately NOT among them, and there is no
+    automatic reconciliation anywhere -- not on a timer, and not at app
+    startup either. Requeuing a run that is still executing makes the
+    poller re-claim it and re-bill all seven stages against the same
+    run_id, and nothing in the schema distinguishes *abandoned by a dead
+    process* from *still executing*: `started_at` is stamped once and
+    never refreshed, and a heartbeat or owner column would be DDL this
+    plan does not have. A startup call was kept for one round on the
+    argument that a fresh process owns no in-flight runs; ADR-017's
+    documented CLI entrypoint makes that false. Reconciliation is an
+    explicit operator command instead (`python -m cli reset-stuck-runs`).
+    Read `app.api.app.lifespan`'s docstring before re-adding either.
     """
     scheduler = BackgroundScheduler(timezone="UTC")
     scheduler.add_job(poll_queued_runs, "interval", seconds=30,

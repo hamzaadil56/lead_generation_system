@@ -15,36 +15,44 @@ log = structlog.get_logger()
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Start the scheduler with the app; stop it cleanly on shutdown.
 
-    This startup call is the ONLY place stuck runs are reconciled, and that
-    is deliberate. Do not add a timed `reset_stuck_runs` job -- one was
-    added and removed. A timer cannot tell a run abandoned by a dead
-    process from one still executing in this process (`started_at` is
-    stamped once and never refreshed, and there is no heartbeat column;
-    that would be DDL). It therefore requeues live runs mid-flight, and the
-    next 30-second poll re-claims and concurrently re-executes the same
-    run_id: double billing and two writers on the same rows.
+    Startup deliberately does NOT reconcile stuck runs, and neither does
+    any timer. Both have been tried and both are unsafe here; read this
+    before adding either back.
 
-    Startup has no such race -- it runs before the scheduler starts, so no
-    run can be in flight -- and it covers the case that actually occurs: a
-    process dying mid-run. Every other way a run could be stranded while
-    this process stays alive is closed inside `execute_run`, which writes
-    terminal state before re-raising on every path it can raise from.
+    `reset_stuck_runs` flips a run from `running` to `queued`. If that run
+    is still executing somewhere, the poller re-claims it and a second
+    process walks all seven stages against the same run_id -- duplicated
+    Serper and Firecrawl spend, two writers on the same business rows, and
+    whichever finishes second overwrites the terminal state. `execute_run`
+    cannot defend against this: it deliberately allows `running`, because
+    refusing it would deadlock the poller that just claimed the run.
 
-    Hence the cutoff of 0: requeue anything still `running`. That rests on
-    an assumption worth naming -- under ADR-010 this is one container with
-    one in-process scheduler, so a freshly started process owns no
-    in-flight runs and anything left `running` is by definition orphaned by
-    the process that died. This is the only place that assumption is
-    load-bearing: the claim path is already multi-instance-safe on its own
-    (`claim_next_queued_run` uses FOR UPDATE SKIP LOCKED). If a second
-    instance is ever deployed, this line -- not a timer -- is what needs
-    rethinking, and a heartbeat column is the shape of the answer.
+    A timed job cannot tell *abandoned by a dead process* from *still
+    executing*: `started_at` is stamped once and never refreshed, and
+    there is no heartbeat or owner column (that would be DDL).
+
+    A startup call was kept for one round on the argument that a freshly
+    started process owns no in-flight runs. That argument is false in this
+    deployment: ADR-017 and the Dockerfile document the CLI as a second
+    entrypoint into the same image and database, so this container can be
+    restarting (deploy, crash, OOM, `docker compose restart`) while a CLI
+    run is minutes into its scrape stage. A cutoff of 0 requeues it; any
+    other cutoff is still a guess about whether another process is alive.
+
+    So reconciliation is an operator action, not a timer:
+
+        docker compose run --rm api python -m cli reset-stuck-runs
+
+    A human running that knows what is currently executing. Everything a
+    live process can do to strand its own run is already closed inside
+    `execute_run`, which writes terminal state before re-raising on every
+    path it can raise from; only a process that dies mid-run leaves a
+    stranded row, and that is exactly the case an operator can identify.
     """
-    from app.scheduler import build_scheduler, reset_stuck_runs
+    from app.scheduler import build_scheduler
 
     scheduler = None
     if not app.state.disable_scheduler:
-        reset_stuck_runs(max_age_hours=0)
         scheduler = build_scheduler()
         scheduler.start()
         log.info("scheduler.started")

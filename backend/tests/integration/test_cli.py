@@ -48,6 +48,22 @@ def _recent_iso(days: int = 5) -> str:
 
 
 @pytest.fixture
+def scheduler_env(session, monkeypatch):
+    """`reset_stuck_runs` lives in `app.scheduler` and resolves
+    `get_session` as that module's global, so patching `cli.get_session`
+    is not enough -- without this the command would run against the real
+    database instead of the rolled-back fixture session."""
+    import app.scheduler as sched
+
+    @contextmanager
+    def _fake_get_session():
+        yield session
+
+    monkeypatch.setattr(sched, "get_session", _fake_get_session)
+    return session
+
+
+@pytest.fixture
 def cli_env(session, monkeypatch):
     """Points the CLI's DB access at the shared per-test `session` fixture
     (so every stage a single `run-all` invocation triggers operates in the
@@ -288,3 +304,93 @@ def test_run_all_streams_every_stage_outcome_on_a_clean_run(cli_env):
 
     for stage_name in ("discover", "scrape", "extract", "score", "enrich"):
         assert f"{stage_name}:" in result.output
+
+
+def test_run_all_creates_its_run_as_running_so_a_poller_cannot_claim_it(
+        cli_env, monkeypatch):
+    """C2 variant B: cross-process double execution through the queued gap.
+
+    `run-all` used to commit the `Run` as `queued` and only *then*
+    construct three provider clients before calling `execute_run`. ADR-017
+    and the Dockerfile document the CLI as a second entrypoint into the
+    same image and database, so during that gap the API container's
+    30-second poller could `claim_next_queued_run` the row and walk all
+    seven stages against the same run_id concurrently -- duplicated Serper
+    and Firecrawl spend and two writers on the same business rows.
+    `execute_run`'s re-entry guard cannot help: it deliberately allows
+    `running` (refusing it would deadlock the poller).
+
+    The CLI now creates the run as `running` with `started_at` set in the
+    same transaction, so the poller's `status == "queued"` filter never
+    sees it. This asserts a poller finds nothing to claim at the moment
+    `execute_run` is entered -- the far end of the old window.
+    """
+    from app.repositories.runs import claim_next_queued_run
+
+    claims: list[int | None] = []
+    real_execute = cli.execute_run
+
+    def spy_execute(run_id, **kwargs):
+        claims.append(claim_next_queued_run(cli_env))
+        return real_execute(run_id, **kwargs)
+
+    monkeypatch.setattr(cli, "execute_run", spy_execute)
+
+    result = _invoke_run_all()
+    assert result.exit_code == 0, result.output
+
+    assert claims == [None], (
+        "a poller claimed the CLI's run out from under it; the run row was "
+        "visible as `queued`")
+    run = cli_env.query(Run).one()
+    assert run.started_at is not None
+    assert run.status == "complete"
+
+
+def test_reset_stuck_runs_is_an_explicit_command_not_an_automatic_job(
+        cli_env, scheduler_env):
+    """C2: no automatic reconciliation, only an operator-invoked one.
+
+    Without an ownership or heartbeat column no *automatic* reset is safe
+    in a multi-process deployment: every cutoff is a guess about whether
+    another process is still alive, and requeuing a live run makes the
+    poller re-claim and concurrently re-execute it. An operator running
+    this deliberately knows what is running; a timer never does.
+    """
+    from datetime import datetime as _dt
+
+    cli_env.add(Run(status="running", source="cli", search_plan={},
+                    started_at=_dt.utcnow() - timedelta(hours=48)))
+    cli_env.add(Run(status="running", source="ui", search_plan={},
+                    started_at=_dt.utcnow()))
+    cli_env.commit()
+
+    result = runner.invoke(cli.app, ["reset-stuck-runs",
+                                     "--older-than-hours", "24"])
+
+    assert result.exit_code == 0, result.output
+    assert "1" in result.output
+    cli_env.expire_all()
+    by_source = {r.source: r for r in cli_env.query(Run).all()}
+    assert by_source["cli"].status == "queued"
+    assert by_source["cli"].started_at is None
+    # The recent run belongs to a process that is very likely still alive.
+    assert by_source["ui"].status == "running"
+
+
+def test_reset_stuck_runs_defaults_to_a_conservative_cutoff(
+        cli_env, scheduler_env):
+    """The default must not requeue a run that started an hour ago: the
+    whole risk this command carries is guessing that a live process is
+    dead."""
+    from datetime import datetime as _dt
+
+    cli_env.add(Run(status="running", source="cli", search_plan={},
+                    started_at=_dt.utcnow() - timedelta(hours=1)))
+    cli_env.commit()
+
+    result = runner.invoke(cli.app, ["reset-stuck-runs"])
+
+    assert result.exit_code == 0, result.output
+    cli_env.expire_all()
+    assert cli_env.query(Run).one().status == "running"

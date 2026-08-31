@@ -27,8 +27,9 @@ from fastapi.testclient import TestClient
 
 from app.api.app import create_app
 
-# `reset_stuck_runs` is intentionally absent: it is called once at startup,
-# never on a timer (a timed reconciler requeues live runs mid-flight).
+# `reset_stuck_runs` is intentionally absent, and not merely from the
+# timer: startup does not call it either. See
+# `test_startup_never_reconciles_stuck_runs` below.
 JOB_IDS = {"poll_queued_runs", "retry_failed_businesses",
            "refresh_stale_businesses"}
 
@@ -83,9 +84,34 @@ def test_the_lifespan_starts_the_scheduler_and_shuts_it_down(stubbed):
         assert {j.id for j in scheduler.get_jobs()} == JOB_IDS
 
     assert not scheduler.running, "the lifespan never shut the scheduler down"
-    # Startup passes a cutoff of 0: a freshly started process owns no
-    # in-flight runs, so anything still `running` is orphaned.
-    assert stubbed["reset"] == [0]
+
+
+def test_startup_never_reconciles_stuck_runs(stubbed):
+    """C2: startup used to call `reset_stuck_runs(0)`, requeuing every run
+    still marked `running` -- on the argument that a freshly started
+    process owns no in-flight runs.
+
+    That argument is false in this deployment. ADR-017 and `Dockerfile`
+    document the CLI as a second entrypoint into the same image and
+    database, so an API container can be restarting (deploy, crash, OOM,
+    `docker compose restart`) while a CLI run is minutes into its scrape
+    stage. Requeuing it lets the poller re-claim a run another process is
+    still executing: `execute_run` deliberately allows `running`, so both
+    processes walk all seven stages against the same run_id -- duplicated
+    Serper and Firecrawl spend and two writers on the same rows.
+
+    Without an ownership or heartbeat column (DDL this wave does not have)
+    no *automatic* reset is safe: every cutoff, zero included, is a guess
+    about whether another process is alive. Reconciliation is an explicit
+    operator command instead -- `python -m cli reset-stuck-runs`. Do not
+    re-add a call here or a job in `build_scheduler`.
+    """
+    with TestClient(create_app()) as client:
+        assert client.get("/health").status_code == 200
+
+    assert stubbed["reset"] == [], (
+        "startup reconciled stuck runs; that requeues a run another "
+        "process may still be executing")
 
 
 def test_disable_scheduler_leaves_the_lifespan_inert(stubbed):

@@ -207,9 +207,14 @@ queues — real capabilities — at the cost of Redis, worker processes, and a
 much harder debugging story. One container, no broker.
 
 **Consequences.** A container restart kills an in-flight run; the status
-machine makes recovery a re-run, and stuck runs self-heal on startup. Two
-FastAPI instances would double-execute — fix at that point is a Postgres
-advisory lock.
+machine makes recovery a re-run. Stuck runs do **not** self-heal: an
+operator requeues them with `python -m cli reset-stuck-runs` (amended
+2026-08-31 — see ADR-025's amendment). Two FastAPI instances would not
+double-execute *through the claim path* (`SELECT ... FOR UPDATE SKIP
+LOCKED`), but nothing prevents two processes from executing the same run
+once something has put it back to `queued` while it is still in flight —
+which is why no automatic reconciler exists. A heartbeat or owner column
+is the shape of a real fix.
 
 ---
 
@@ -690,11 +695,26 @@ with `SELECT ... FOR UPDATE SKIP LOCKED`, and calls `execute_run`.
 **Why.** No HTTP client, proxy, or platform load balancer will hold a
 connection open for a multi-minute run. Queueing also makes the run
 inspectable while it happens -- the UI polls `GET /runs/{id}` -- and makes a
-crashed process recoverable, because `reset_stuck_runs` requeues anything
-left `running` at startup. `SKIP LOCKED` is what makes a second API instance
-safe, which the spec had listed as a known limitation requiring an advisory
-lock.
+crashed process recoverable, because `reset_stuck_runs` can requeue
+anything left `running`. `SKIP LOCKED` makes the *claim* safe against a
+second poller, which the spec had listed as a known limitation requiring an
+advisory lock.
 
 **Consequences.** A run does not start the instant it is created; worst case
 it waits 30 seconds. The UI must poll rather than block. `Run.status` is now
 load-bearing for scheduling, not just for display.
+
+**Amendment (2026-08-31).** The original text claimed `reset_stuck_runs` ran
+at startup and that `SKIP LOCKED` made a second instance safe outright. Both
+overclaimed. `SKIP LOCKED` protects the claim query only; requeuing a run
+that is still executing elsewhere puts it back in the pool and a poller
+re-claims it, so both processes walk all seven stages against one `run_id`.
+ADR-017 makes that concrete: the CLI is a second entrypoint into the same
+image and database, so a restarting API container could requeue a live CLI
+run. Two changes followed. (1) `reset_stuck_runs` is no longer called
+automatically — not on a timer, not at startup; it is
+`python -m cli reset-stuck-runs --older-than-hours N`, run by an operator
+who knows what is executing. (2) `run-all` creates its `Run` as `running`
+with `started_at` set, in the same transaction, so the poller's
+`status == "queued"` filter never sees a run the CLI owns. Neither needed a
+migration. Settling this properly needs a heartbeat or owner column.

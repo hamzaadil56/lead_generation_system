@@ -128,12 +128,14 @@ def test_a_job_never_raises_into_the_scheduler_thread(patched, session, monkeypa
 
 def test_reset_stuck_runs_with_a_zero_cutoff_requeues_anything_running(
         patched, session):
-    """What the app's startup call passes.
+    """The most aggressive cutoff an operator can pass.
 
-    Under ADR-010 there is one container with one in-process scheduler, so
-    a freshly started process owns no in-flight runs: anything still
-    `running` at startup is by definition orphaned by the process that
-    died, however recently it started.
+    `python -m cli reset-stuck-runs --older-than-hours 0` requeues every
+    run currently marked `running`. Nothing calls this automatically --
+    not the scheduler and not app startup -- because a cutoff of 0 is only
+    correct when a human has confirmed no process is executing anything.
+    The behaviour is asserted here so the command keeps working, not
+    because anything fires it on a schedule.
     """
     session.add(Run(status="running", source="ui", search_plan={},
                     started_at=datetime.utcnow() - timedelta(seconds=1)))
@@ -145,15 +147,18 @@ def test_reset_stuck_runs_with_a_zero_cutoff_requeues_anything_running(
 
 
 def test_build_scheduler_does_not_put_reset_stuck_runs_on_a_timer(patched):
-    """`reset_stuck_runs` is startup-only, and must stay that way.
+    """`reset_stuck_runs` is operator-invoked only, and must stay that way.
 
     A timed reconciler cannot tell *abandoned by a dead process* from
-    *still executing in this one*: `started_at` is stamped once and never
-    refreshed, so a run still going past the cutoff would be flipped back
-    to `queued` mid-flight and the next 30-second poll would re-claim and
-    concurrently re-execute the same run_id -- double billing and two
-    writers on the same rows. The startup call has no such race because it
-    fires before the scheduler starts, when no run can be in flight.
+    *still executing*: `started_at` is stamped once and never refreshed,
+    so a run still going past the cutoff is flipped back to `queued`
+    mid-flight and the next 30-second poll re-claims and concurrently
+    re-executes the same run_id -- double billing and two writers on the
+    same rows. App startup is no safer (ADR-017 documents the CLI as a
+    second entrypoint into the same database, so a restarting API
+    container can requeue a live CLI run); see
+    `tests/api/test_lifespan.py::test_startup_never_reconciles_stuck_runs`.
+    The only caller is `python -m cli reset-stuck-runs`.
     """
     jobs = {j.id: j for j in patched.build_scheduler().get_jobs()}
 

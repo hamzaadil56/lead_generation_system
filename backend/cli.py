@@ -16,6 +16,7 @@ from app.pipeline.extract_signals import ExtractSignalsStage
 from app.pipeline.fetch_reviews import FetchReviewsStage
 from app.pipeline.score import ScoreStage
 from app.pipeline.scrape_site import ScrapeSiteStage
+from app.scheduler import reset_stuck_runs
 from app.services.budget import spend_usd
 from app.services.export import export_leads
 from app.services.outcomes import record_outcome
@@ -132,10 +133,24 @@ def run_all(vertical: str, state: str | None = None, location: str | None = None
     service stays in charge of "which stages, in what order".
     """
     with get_session() as s:
-        run = Run(status="queued", source="cli",
+        # Created `running`, with `started_at`, in the SAME transaction --
+        # never `queued`. The CLI executes the run itself moments later,
+        # but the API container's poller filters on `status == "queued"`,
+        # so a row committed as `queued` was claimable during the gap
+        # between this commit and `execute_run` below (three provider
+        # clients get constructed in between). ADR-017 and the Dockerfile
+        # document the CLI as a second entrypoint into the same image and
+        # database, so that poller is a real process: it would walk all
+        # seven stages against this same run_id concurrently -- duplicated
+        # Serper and Firecrawl spend and two writers on the same business
+        # rows. `execute_run` cannot refuse `running` (that would deadlock
+        # the poller on runs it just claimed), so the fix has to be here:
+        # the row is never visible to the claim query at all.
+        now = datetime.utcnow()
+        run = Run(status="running", source="cli",
                   search_plan={"vertical": vertical, "state": state,
                                "location": location, "pages": pages},
-                  max_cost_usd=max_cost, created_at=datetime.utcnow())
+                  max_cost_usd=max_cost, created_at=now, started_at=now)
         s.add(run)
         s.commit()
         run_id = run.id
@@ -187,6 +202,29 @@ def outcome(cid: str, status: str, notes: str | None = None) -> None:
     with get_session() as s:
         record_outcome(s, cid, status, notes)
         typer.echo(f"{cid} -> {status}")
+
+
+@app.command("reset-stuck-runs")
+def reset_stuck_runs_cmd(
+        older_than_hours: int = typer.Option(
+            6, "--older-than-hours", min=0,
+            help="Requeue runs that have been `running` longer than this. "
+                 "Only use a value you are sure exceeds any run still "
+                 "executing in another process.")) -> None:
+    """Requeue runs stranded at `running` by a process that died mid-run.
+
+    Deliberately manual. Nothing reconciles runs automatically -- not the
+    scheduler, not app startup. A run marked `running` is either abandoned
+    or in flight, and the schema cannot tell the two apart: `started_at` is
+    stamped once and never refreshed, and there is no heartbeat or owner
+    column. Requeuing a live run makes the poller re-claim it and re-bill
+    all seven stages against the same run_id, so every automatic cutoff is
+    a guess about whether another process is alive. An operator running
+    this knows which runs are actually executing; a timer never does.
+    """
+    count = reset_stuck_runs(max_age_hours=older_than_hours)
+    typer.echo(f"requeued {count} run(s) stuck running for more than "
+               f"{older_than_hours}h")
 
 
 @app.command()
