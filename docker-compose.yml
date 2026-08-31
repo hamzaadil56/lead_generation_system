@@ -6,4 +6,30 @@ services:
       POSTGRES_DB: leadgen
     ports: ["5432:5432"]
     volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: ./backend
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # `db` not `localhost`: inside the compose network the container
+      # reaches Postgres by service name.
+      DATABASE_URL: postgresql+psycopg://postgres:dev@db:5432/leadgen
+      SERPER_KEY: ${SERPER_KEY:-}
+      FIRECRAWL_KEY: ${FIRECRAWL_KEY:-}
+      SERPAPI_KEY: ${SERPAPI_KEY:-}
+      API_KEY: ${API_KEY:-}
+    ports: ["8000:8000"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
 volumes: { pgdata: }

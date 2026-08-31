@@ -188,8 +188,19 @@ what each command does — that is what you actually need:
 | `export` | Ranked CSV, filtered by quadrant and minimum fit |
 | `outcome` | Record what actually happened with a lead — the feedback loop |
 | `spend` | What this run, or everything, has cost so far |
+| `POST /runs` | Queue a run (`status="queued"`); returns 201 immediately, does not execute inline |
+| `GET /runs/{id}` | Poll a queued or in-progress run's status |
+| `GET /leads`, `GET /leads/{cid}` | Filtered, paginated leads and lead detail for the dashboard |
+| `PUT /leads/{cid}/outcome`, `PUT /leads/{cid}/manual-facts` | The same feedback loop and manual capture, from the API |
 
-181 tests pass, `mypy app` is clean, and the domain-layer import contract holds.
+Plan 2 adds an in-process APScheduler, started with the app's lifespan: it polls
+every 30 seconds and executes queued runs, so `POST /runs` only enqueues — the
+scheduler is what actually calls `execute_run`.
+
+290 tests pass, `mypy app` is clean, and the domain-layer import contract holds.
+The API and CLI now share one Docker image (`backend/Dockerfile`, ADR-017); `docker
+compose up db api` runs the service, and the CLI runs inside the same image via
+`docker compose run --rm api python -m cli ...`.
 **Nothing has been run against the live APIs yet.** The whole system is exercised
 through fake clients replaying the saved fixtures, so the first real run is still
 the first real run — budget it small.

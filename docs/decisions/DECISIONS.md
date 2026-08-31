@@ -677,3 +677,24 @@ rework, for no behavioural gain.
 is why this ADR exists rather than a silent convention. An `import-linter`
 contract enforces the split so it cannot erode. If the pipeline ever needs a
 filtered read, that is the signal to revisit.
+
+## ADR-025 — The API queues runs; the scheduler executes them
+
+**Context.** `POST /runs` could execute the pipeline inline and return when
+it finished. A full run takes minutes.
+
+**Decision.** `POST /runs` creates the run with `status="queued"` and returns
+201 immediately. APScheduler polls every 30 seconds, claims one queued run
+with `SELECT ... FOR UPDATE SKIP LOCKED`, and calls `execute_run`.
+
+**Why.** No HTTP client, proxy, or platform load balancer will hold a
+connection open for a multi-minute run. Queueing also makes the run
+inspectable while it happens -- the UI polls `GET /runs/{id}` -- and makes a
+crashed process recoverable, because `reset_stuck_runs` requeues anything
+left `running` at startup. `SKIP LOCKED` is what makes a second API instance
+safe, which the spec had listed as a known limitation requiring an advisory
+lock.
+
+**Consequences.** A run does not start the instant it is created; worst case
+it waits 30 seconds. The UI must poll rather than block. `Run.status` is now
+load-bearing for scheduling, not just for display.
