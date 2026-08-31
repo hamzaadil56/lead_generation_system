@@ -11,10 +11,11 @@ dependencies = [
   # requests.RequestException to tell a transport failure apart from a
   # dead target site. It was already installed transitively.
   "requests>=2.31",
+  "fastapi>=0.115", "uvicorn[standard]>=0.30", "apscheduler>=3.10",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-cov", "mypy>=1.9", "import-linter>=2.0", "ruff>=0.4"]
+dev = ["pytest>=8.0", "pytest-cov", "mypy>=1.9", "import-linter>=2.0", "ruff>=0.4", "types-pyyaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     firecrawl_key: str
     serpapi_key: str | None = None
     sentry_dsn: str | None = None
+    # Shared secret the Next.js server presents as X-API-Key. Optional so the
+    # CLI and the test suite keep working without it; when unset, every
+    # protected route returns 401 rather than silently allowing access.
+    api_key: str | None = None
 
     enrichment_top_n: int = 25
     stratified_per_segment: int = 15
