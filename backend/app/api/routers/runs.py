@@ -11,6 +11,7 @@ from app.repositories.runs import get_run, list_runs
 from app.schemas.common import Page
 from app.schemas.runs import PreviewOut, RunCreate, RunOut
 from app.services.preview import preview_search_plan
+from app.services.search_plan import build_search_plan
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 CONFIG = Path("config")
@@ -27,11 +28,22 @@ def create_run(body: RunCreate, db: Session = Depends(get_db)) -> RunOut:
 
     Deliberately does not execute inline: a full run takes minutes, which no
     HTTP client or proxy will hold open.
+
+    The plan is built and thrown away: this endpoint stores the *request*,
+    and `execute_run` rebuilds the plan at execution time. Building it here
+    is validation, and it has to be the same call preview makes. Create
+    used to check only the vertical, so `{"vertical":"hvac","state":"ZZ"}`
+    returned 201 while `POST /runs/preview` -- three lines below, same
+    body -- returned 400; the queued run was then claimed ~30 seconds
+    later and landed `failed` with a stored traceback (I2). Validating
+    through `build_search_plan` rather than re-implementing the checks
+    here is the point: queue time was the third caller of that function
+    and the only one not using it.
     """
-    verticals_cfg, _ = _configs()
-    if body.vertical not in verticals_cfg:
-        raise HTTPException(status_code=400,
-                            detail=f"unknown vertical: {body.vertical}")
+    verticals_cfg, locations_cfg = _configs()
+    build_search_plan(body.vertical, body.state, body.location,
+                      verticals_cfg, locations_cfg,
+                      pages_per_query=body.pages)
 
     run = Run(status="queued", source="ui",
               search_plan={"vertical": body.vertical, "state": body.state,
@@ -45,11 +57,15 @@ def create_run(body: RunCreate, db: Session = Depends(get_db)) -> RunOut:
 
 @router.post("/preview", response_model=PreviewOut)
 def preview_run(body: RunCreate, db: Session = Depends(get_db)) -> PreviewOut:
-    """What this run would search and cost. Spends nothing."""
+    """What this run would search and cost. Spends nothing.
+
+    No vertical pre-check: `preview_search_plan` calls `build_search_plan`,
+    which validates the vertical and the state, with the same message and
+    the same 400. The duplicate check that used to sit here was deferred
+    item 5; it goes now that create validates the same way, leaving one
+    validation path for both endpoints.
+    """
     verticals_cfg, locations_cfg = _configs()
-    if body.vertical not in verticals_cfg:
-        raise HTTPException(status_code=400,
-                            detail=f"unknown vertical: {body.vertical}")
     return preview_search_plan(db, body.vertical, body.state, body.location,
                                body.pages, verticals_cfg, locations_cfg)
 

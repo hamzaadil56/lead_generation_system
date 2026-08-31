@@ -122,3 +122,49 @@ def test_a_malformed_body_is_still_a_422_not_a_400(client):
     r = client.post("/runs", json={"vertical": "hvac",
                                    "location": "Houston, TX", "pages": 999})
     assert r.status_code == 422
+
+
+def test_post_runs_rejects_an_unknown_state_the_way_preview_does(client,
+                                                                 session):
+    """I2: create and preview validated the same input differently.
+
+    `POST /runs/preview {"state":"ZZ"}` returned 400. `POST /runs` with the
+    identical body returned 201, and the run was claimed ~30 seconds later,
+    failed in `build_search_plan` during setup, and landed as `failed` with
+    a stored traceback. The user got a success followed by a mysterious
+    failed run, for input the adjacent endpoint rejects cleanly. Queue time
+    is the third caller of `build_search_plan` and was the one still
+    unvalidated.
+    """
+    r = client.post("/runs", json={"vertical": "hvac", "state": "ZZ"})
+
+    assert r.status_code == 400
+    assert "ZZ" in r.json()["detail"]
+    assert session.query(Run).count() == 0
+
+
+def test_post_runs_rejects_an_unknown_vertical(client, session):
+    r = client.post("/runs", json={"vertical": "not_a_vertical",
+                                   "location": "Houston, TX"})
+
+    assert r.status_code == 400
+    assert session.query(Run).count() == 0
+
+
+def test_post_runs_and_preview_agree_on_every_plan_input(client):
+    """One validation path, not two. Whatever preview accepts, create must
+    accept, and whatever preview rejects, create must reject -- otherwise
+    the confirm screen and the button beneath it disagree."""
+    bodies = [
+        {"vertical": "hvac", "state": "TX"},
+        {"vertical": "hvac", "state": "tx"},
+        {"vertical": "hvac", "location": "Houston, TX"},
+        {"vertical": "hvac", "state": "ZZ"},
+        {"vertical": "not_a_vertical", "location": "Houston, TX"},
+    ]
+    for body in bodies:
+        created = client.post("/runs", json=body)
+        previewed = client.post("/runs/preview", json=body)
+        assert (created.status_code < 400) == (previewed.status_code < 400), (
+            f"create and preview disagree on {body}: "
+            f"{created.status_code} vs {previewed.status_code}")
