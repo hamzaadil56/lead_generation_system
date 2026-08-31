@@ -1,0 +1,158 @@
+from abc import ABC, abstractmethod
+from collections.abc import Callable
+from dataclasses import dataclass
+
+import structlog
+from sqlalchemy.orm import Session
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
+
+from app.core.errors import (
+    BudgetExceeded,
+    BusinessPermanentError,
+    RunPermanentError,
+    TransientError,
+)
+from app.models.business import Business, BusinessStatus
+
+log = structlog.get_logger()
+CIRCUIT_BREAKER_THRESHOLD = 5
+
+
+@dataclass
+class StageReport:
+    processed: int = 0
+    failed: int = 0
+    aborted: bool = False
+    reason: str | None = None
+
+
+class Stage(ABC):
+    """Template Method: retry, error capture, and status advancement are
+    written once here; subclasses supply only `process`."""
+
+    name: str
+    consumes: BusinessStatus
+    produces: BusinessStatus
+    # Set by run() before the selection loop so process() implementations
+    # (which are not passed run_id — see scrape_site.py) can still stamp it
+    # on the ApiCall rows they write (Correction B / spend_usd under-report
+    # fix). Declared on the class body so subclasses and mypy both see it.
+    _run_id: int | None = None
+
+    @abstractmethod
+    def process(self, business: Business, session: Session) -> None: ...
+
+    def on_failure(self, business: Business, session: Session,
+                   exc: BaseException) -> None:
+        """Hook: record durable side-effects of a business that failed.
+
+        Called AFTER the per-business SAVEPOINT has unwound and BEFORE the
+        error handlers below, so a stage can persist rows describing what
+        really happened (an `api_calls` row for a provider call that was
+        actually made) without committing from inside `process`.
+
+        That distinction is the whole point. `scrape_site` used to commit
+        the failed-call row from within `process`, which closed the
+        savepoint and expired the ORM -- so tenacity's second attempt hit a
+        detached `business` and raised a SQLAlchemy error instead of
+        retrying. One Firecrawl 429 cost exactly one provider call and a
+        permanently FAILED business (N1). Anything added here is committed
+        by `run`.
+        """
+
+    def select(self, session: Session, run_id: int | None, limit: int) -> list[Business]:
+        q = session.query(Business).filter(Business.status == self.consumes)
+        return q.limit(limit).all()
+
+    @retry(retry=retry_if_exception_type(TransientError),
+           stop=stop_after_attempt(3),
+           wait=wait_exponential(multiplier=1, min=1, max=16), reraise=True)
+    def _process_with_retry(self, business: Business, session: Session) -> None:
+        self.process(business, session)
+
+    def run(self, session: Session, run_id: int | None, limit: int = 500,
+            budget_check: Callable[[Session], None] | None = None) -> StageReport:
+        """`budget_check` is called BEFORE each business and may raise
+        `BudgetExceeded`. The ceiling has to be enforced here rather than
+        only at stage boundaries: `scrape` is the only stage that spends
+        meaningful cash and, once entered, it used to run to completion --
+        so `--max-cost 0.05` really did spend ~$0.60 (I1).
+
+        Stopping mid-stage is clean by construction: the businesses that
+        were not reached keep their current status, so the run resumes
+        exactly where it left off.
+        """
+        self._run_id = run_id
+        report = StageReport()
+        consecutive_fatal = 0
+
+        for business in self.select(session, run_id, limit):
+            if budget_check is not None:
+                try:
+                    budget_check(session)
+                except BudgetExceeded as exc:
+                    report.aborted = True
+                    report.reason = str(exc)
+                    log.warning("stage.budget_exceeded", stage=self.name,
+                                reason=str(exc))
+                    break
+
+            try:
+                try:
+                    # A SAVEPOINT scopes rollback to *this business only*:
+                    # on failure only this unit of work unwinds, leaving
+                    # prior committed businesses (and the outer
+                    # transaction) intact. Plain session.rollback() would
+                    # roll back the whole transaction the Session
+                    # participates in, which is too coarse for per-business
+                    # isolation (see ADR-009 note below).
+                    with session.begin_nested():
+                        self._process_with_retry(business, session)
+                        business.status = self.produces
+                except Exception as exc:
+                    # The savepoint has already unwound, so it is safe to
+                    # commit here -- and only here. Nothing inside the
+                    # retry path may commit (N1).
+                    self.on_failure(business, session, exc)
+                    session.commit()
+                    raise
+                session.commit()          # Unit of Work per business (ADR-009)
+                report.processed += 1
+                consecutive_fatal = 0
+
+            except RunPermanentError as exc:
+                consecutive_fatal += 1
+                report.failed += 1
+                if consecutive_fatal >= CIRCUIT_BREAKER_THRESHOLD:
+                    report.aborted = True
+                    report.reason = str(exc)
+                    log.error("stage.aborted", stage=self.name, reason=str(exc))
+                    break
+
+            except BusinessPermanentError:
+                with session.begin_nested():
+                    business.status = self.produces      # data, not failure
+                session.commit()
+                report.processed += 1
+                # This business was handled successfully (as data), so it
+                # must not count toward the run-level circuit breaker --
+                # otherwise five dead domains in a row would abort a run
+                # that is working exactly as designed.
+                consecutive_fatal = 0
+
+            except Exception as exc:
+                business.status = BusinessStatus.FAILED
+                business.failed_stage = self.name
+                business.error_message = str(exc)[:500]
+                business.attempt_count += 1
+                session.commit()
+                report.failed += 1
+                log.warning("stage.business_failed", stage=self.name,
+                            cid=business.cid, error=str(exc))
+
+        return report

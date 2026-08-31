@@ -1,0 +1,17 @@
+[importlinter]
+root_package = app
+include_external_packages = True
+
+[importlinter:contract:domain-is-pure]
+name = Domain layer imports no frameworks
+type = forbidden
+source_modules = app.domain
+forbidden_modules =
+    sqlalchemy
+    httpx
+    fastapi
+    firecrawl
+    serpapi
+    app.models
+    app.clients
+    app.repositories

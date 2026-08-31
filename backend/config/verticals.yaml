@@ -1,0 +1,7 @@
+hvac:
+  search_terms:
+    - "hvac contractor"
+    - "air conditioning repair"
+    - "heating and cooling company"
+    - "furnace repair"
+  ruleset: hvac_v1

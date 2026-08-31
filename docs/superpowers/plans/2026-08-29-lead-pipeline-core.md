@@ -255,7 +255,8 @@ git commit -m "chore: scaffold backend with fail-fast settings and domain import
 
 **Interfaces:**
 - Consumes: `get_settings()` from Task 1
-- Produces: ORM classes `Business`, `Run`, `RunBusiness`, `SearchQuery`, `RawPayload`, `ApiCall`, `Review`, `Signals`, `Score`, `ManualFacts`, `Contact`, `Outcome`, `Suppression`, `Ruleset`. Enum `BusinessStatus` with members `DISCOVERED`, `PLACE_FETCHED`, `SITE_SCRAPED`, `SIGNALS_EXTRACTED`, `SCORED`, `FILTERED_OUT`, `FAILED`. Enum `Segment` with `EMERGING`, `GROWTH`, `ESTABLISHED`, `ENTERPRISE`. Session factory `get_session()`.
+- Produces: ORM classes `Business`, `Run`, `RunBusiness`, `SearchQuery`, `RawPayload`, `ApiCall`, `Review`, `Signals`, `Score`, `ManualFacts`, `Contact`, `Outcome`, `Suppression`, `Ruleset`. Enum `BusinessStatus` with members `DISCOVERED`, `PLACE_FETCHED`, `SITE_SCRAPED`, `SIGNALS_EXTRACTED`, `SCORED`, `FILTERED_OUT`, `FAILED`. Session factory `get_session()`.
+- **`Segment` is NOT defined here.** It lives in `app/domain/segments.py` (Task 3) and is imported. Task 3 must therefore be implemented before this task's migration runs, or `Segment` stubbed and replaced. Controller ruling, pre-flight scan.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -346,6 +347,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.models.base import Base
 
 
+# Segment is defined ONCE, in app/domain/segments.py (Task 3), and imported
+# here. The domain may not import models, so the dependency runs this way
+# only. Do not re-declare it in this module.
+from app.domain.segments import Segment
+
+
 class BusinessStatus(enum.StrEnum):
     DISCOVERED = "discovered"
     PLACE_FETCHED = "place_fetched"
@@ -354,13 +361,6 @@ class BusinessStatus(enum.StrEnum):
     SCORED = "scored"
     FILTERED_OUT = "filtered_out"
     FAILED = "failed"
-
-
-class Segment(enum.StrEnum):
-    EMERGING = "emerging"
-    GROWTH = "growth"
-    ESTABLISHED = "established"
-    ENTERPRISE = "enterprise"
 
 
 class Business(Base):
@@ -494,6 +494,7 @@ class Signals(Base):               # REBUILDABLE — all columns nullable
     has_chat_widget: bool | None
     chat_vendor: str | None
     has_contact_form: bool | None
+    software_from_html: str | None  # secondary vendor source, ADR-023
     runs_google_ads: bool | None
     has_meta_pixel: bool | None
     claims_24_7: bool | None
@@ -640,9 +641,9 @@ git commit -m "feat: add database models and initial migration"
 - Create: `backend/app/domain/segments.py`, `backend/app/domain/phone.py`, `backend/tests/unit/test_segments.py`, `backend/tests/unit/test_phone.py`
 
 **Interfaces:**
-- Consumes: `Segment` enum (Task 2) — **re-declared in the domain** as a plain
-  `StrEnum` in `app/domain/segments.py` so the domain imports no ORM. The
-  model's `Enum(Segment)` column imports the domain one.
+- Consumes: nothing. **`Segment` is DEFINED here**, in `app/domain/segments.py`,
+  as a plain `StrEnum`. `app/models/business.py` (Task 2) imports it from here —
+  never the reverse, because the domain may not import models.
 - Produces: `segment_for(rating_count: int | None) -> Segment | None`,
   `validate_phone(raw: str | None) -> str | None` (E.164 or `None`)
 
@@ -1344,7 +1345,7 @@ git commit -m "feat: add rules engine with skip-based coverage normalisation"
 
 **Interfaces:**
 - Consumes: `Ruleset`, `Rule` (Task 6)
-- Produces: `load_ruleset(raw: dict) -> Ruleset` (pure — takes parsed YAML, does no file I/O, keeping the domain clean) and `read_ruleset_file(path: Path) -> Ruleset` in `app/services/`, which does the I/O
+- Produces: `load_ruleset(raw: dict) -> Ruleset` (pure — takes parsed YAML, does no file I/O, keeping the domain clean). **`read_ruleset_file` is NOT produced here** — Task 14 creates it in `app/services/rulesets.py`, and Tasks 14 and 17 import it from there. Do not create it in this task.
 
 - [ ] **Step 1: Write the ruleset**
 
@@ -1592,11 +1593,22 @@ git commit -m "feat: add hvac_v1 ruleset with golden tests from real Houston dat
   - `SearchProvider` Protocol with `search(query: str, page: int = 1) -> SearchResult`
   - `SerperClient(SearchProvider)` and `FakeSearchProvider(SearchProvider)`
 
-- [ ] **Step 1: Save the real response as a fixture**
+- [ ] **Step 1: Verify the fixture (already committed)**
 
-Save the verified 20-record Houston response from spec §5A to
-`backend/tests/fixtures/serper_maps_houston_hvac.json`, unmodified. Real
-messy data catches bugs synthetic fixtures never will.
+`backend/tests/fixtures/serper_maps_houston_hvac.json` is committed — the real
+20-record Serper `/maps` response for "hvac businesses in Houston", unmodified.
+Confirm it before writing tests against it:
+
+```bash
+cd backend && python3 -c "
+import json; d=json.load(open('tests/fixtures/serper_maps_houston_hvac.json'))
+p=d['places']
+assert len(p)==20 and d['credits']==3
+assert len([x for x in p if 'address' not in x])==2      # service-area businesses
+assert len([x for x in p if 'bookingLinks' not in x])==6  # phone-only signal
+print('fixture ok')"
+```
+Expected: `fixture ok`
 
 - [ ] **Step 2: Write the failing test**
 
@@ -2425,7 +2437,7 @@ git commit -m "feat: add error taxonomy, retry policy, and Stage template method
 
 **Interfaces:**
 - Consumes: `SearchProvider` (Task 8), `segment_for` (Task 3), `validate_phone` (Task 3), `Business`, `Run`, `RunBusiness`, `SearchQuery`, `RawPayload`, `ApiCall` (Task 2)
-- Produces: `SearchPlan(vertical: str, search_terms: list[str], locations: list[str], pages_per_query: int)`, `build_search_plan(vertical: str, state: str | None, location: str | None, config: dict) -> SearchPlan`, and `DiscoverStage(provider: SearchProvider)` with `discover(session, run_id, plan) -> StageReport`
+- Produces: `SearchPlan(vertical: str, search_terms: list[str], locations: list[str], pages_per_query: int)`, `build_search_plan(vertical, state, location, verticals_cfg: dict, locations_cfg: dict, pages_per_query: int = 5) -> SearchPlan` (TWO config dicts — Task 17 CLI calls it that way; Step 3 code is authoritative), and `DiscoverStage(provider: SearchProvider)` with `discover(session, run_id, plan) -> StageReport`
 
 - [ ] **Step 1: Write the failing test**
 

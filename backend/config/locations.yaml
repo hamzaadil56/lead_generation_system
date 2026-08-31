@@ -1,0 +1,5 @@
+# Serper resolves natural-language locations and echoes back `ll`,
+# so display names are sufficient — no centroids or zoom levels (ADR-021).
+tx:
+  metros: ["Houston, TX", "Dallas, TX", "San Antonio, TX",
+           "Austin, TX", "Fort Worth, TX", "El Paso, TX"]
