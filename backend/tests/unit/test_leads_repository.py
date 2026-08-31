@@ -2,6 +2,7 @@ from datetime import datetime
 
 from app.models.business import Business, BusinessStatus
 from app.models.derived import Review, Score, Signals
+from app.models.manual import Outcome
 from app.repositories.leads import LeadFilters, get_lead_detail, list_leads
 
 
@@ -113,6 +114,25 @@ def test_get_lead_detail_returns_reasons_signals_and_evidence(session):
 
 def test_get_lead_detail_returns_none_for_an_unknown_cid(session):
     assert get_lead_detail(session, "no-such-cid") is None
+
+
+def test_list_leads_and_detail_show_a_single_outcome_exactly_once(session):
+    """Regression guard for the outcomes.business_id uniqueness fix: a
+    business with exactly one Outcome must still appear once in list_leads
+    with the right total, and get_lead_detail must still surface its
+    outcome_status -- the constraint must not break the happy path."""
+    b = _business(session, "c1", "One Outcome Air")
+    session.add(Outcome(business_id=b.id, status="contacted", source="manual"))
+    session.commit()
+
+    rows, total = list_leads(session, LeadFilters())
+    assert total == 1
+    assert len(rows) == 1
+    assert rows[0].outcome_status == "contacted"
+
+    detail = get_lead_detail(session, "c1")
+    assert detail is not None
+    assert detail.lead.outcome_status == "contacted"
 
 
 def test_get_lead_detail_works_for_a_business_with_no_score_yet(session):

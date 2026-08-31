@@ -1,6 +1,15 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    JSON,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -50,6 +59,13 @@ class Outcome(Base):               # PERMANENT — the ground truth (ADR-006)
     notes: Mapped[str | None] = mapped_column(String)
     contacted_at: Mapped[datetime | None] = mapped_column(DateTime)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    # At most one Outcome per business (repository fix round 1): list_leads'
+    # outerjoin and get_lead_detail's .one_or_none() both assume this, and
+    # record_outcome's check-then-insert is not atomic, so only a DB
+    # constraint can actually guarantee it. Named explicitly so the Alembic
+    # downgrade is portable.
+    __table_args__ = (UniqueConstraint("business_id", name="uq_outcomes_business_id"),)
 
 
 class Suppression(Base):           # PERMANENT — required before the first email
