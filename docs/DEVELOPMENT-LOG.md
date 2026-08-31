@@ -1,9 +1,9 @@
 # Development Log — Lead Pipeline Core
 
 **Last updated:** 2026-08-31
-**Branch:** `feat/lead-pipeline-core` (38 commits, not yet merged)
-**Status:** backend pipeline complete and reviewed — 181 tests pass, `mypy` clean.
-Not yet run against live APIs; no UI yet.
+**Branch:** `feat/api-and-scheduler` (25 commits off `main`, not yet merged)
+**Status:** backend pipeline, HTTP API, and scheduler all complete and reviewed —
+309 tests pass, `mypy` clean. Not yet run against live APIs; no UI yet.
 
 This document explains, in plain language, what exists in this repository and why.
 If you are picking the project back up after time away, read this first.
@@ -32,7 +32,8 @@ Three phases, in order. Each one produced a document that the next one used.
 |---|---|---|
 | Brainstorming | `docs/superpowers/specs/2026-08-27-lead-generation-system-design.md` — the design spec | Approved |
 | Planning | `docs/superpowers/plans/2026-08-29-lead-pipeline-core.md` — 17 numbered build tasks | Approved |
-| Building | The code in `backend/` — all 17 tasks | Complete, reviewed |
+| Building (Plan 1) | The pipeline in `backend/` — 17 tasks | Complete, reviewed, merged |
+| Building (Plan 2) | The API and scheduler — 11 tasks | Complete, reviewed |
 
 Every design choice made along the way is written down in
 `docs/decisions/DECISIONS.md` — 23 numbered decisions, each in the form
@@ -174,7 +175,7 @@ No invented data — see section 6 for why that turned out to matter.
 
 ## 5. Build status
 
-All 17 tasks are implemented and reviewed. Rather than repeat the task list, here is
+All 17 tasks of Plan 1 and all 11 of Plan 2 are implemented and reviewed. Rather than repeat the task list, here is
 what each command does — that is what you actually need:
 
 | Command | What it does |
@@ -197,7 +198,7 @@ Plan 2 adds an in-process APScheduler, started with the app's lifespan: it polls
 every 30 seconds and executes queued runs, so `POST /runs` only enqueues — the
 scheduler is what actually calls `execute_run`.
 
-290 tests pass, `mypy app` is clean, and the domain-layer import contract holds.
+309 tests pass, `mypy app cli.py` is clean, and both import contracts hold.
 The API and CLI now share one Docker image (`backend/Dockerfile`, ADR-017); `docker
 compose up db api` runs the service, and the CLI runs inside the same image via
 `docker compose run --rm api python -m cli ...`.
@@ -264,38 +265,80 @@ The honest summary: **sixteen clean per-task reviews did not add up to a working
 system.** What found the real problems was one reviewer reading everything at once
 and running the code, and then a second one checking the fixes the same way.
 
+### What the API's final review found
+
+The same thing happened again, one layer up. Eleven clean per-task reviews, then a
+final pass found two more critical defects — both invisible from inside any single
+task:
+
+1. **`GET /leads/{cid}` returned 400 for every scored lead.** The API's schema for a
+   scoring reason declared fields (`id`, `applicable`) that the scoring engine does
+   not write; it writes `rule`, `track`, `matched`, `points`, `label`, `evidence`.
+   The CSV exporter read the same JSON correctly, so the codebase had two consumers
+   of one structure with one of them wrong. Both tests that should have caught it
+   missed: one used an empty fixture, the other invented the shape it was testing.
+2. **Two processes could execute the same run at once.** The API's startup routine
+   requeued any run left in progress, on the reasoning that a freshly started process
+   owns nothing — but the CLI is a documented second entrypoint into the same image
+   and database, so a restart could requeue a run the CLI was actively executing and
+   bill it twice.
+
+The second one is worth dwelling on: it was introduced by a *fix* for a different
+problem, removed after review found the race, and then found to still be wrong from
+the other direction. Three passes to get one lifecycle rule right.
+
+**The rule that came out of it:** without a way to know which process owns a run,
+no automatic reconciliation is safe. So there is none — recovery is an explicit
+`python -m cli reset-stuck-runs`, run by a person who knows what is running.
+
+### The pattern behind most of these
+
+Six defects in Plan 2 came from the same source: the plan described an interface
+from memory rather than from the file. A field that did not exist, a keyword spelled
+wrong, a credit cost off by 3×, two arguments silently dropped, ruleset keys that
+were never there, and finally the reason shape above. Every one was caught by an
+implementer or reviewer opening the actual source.
+
+**Read the interface. Do not recall it.**
+
 ---
 
 ## 7. Open items
 
-**No known bugs.** The confirmed bug listed here previously is fixed, as are ten
-findings from the final review and two regressions those fixes introduced.
+**No known bugs.** Two criticals and six important findings from Plan 2's final
+review are all fixed and independently re-verified.
+
+**Decisions waiting on you**, not defects:
+
+- **`estimated_cost` reads about 4× low.** The preview prices the search API but not
+  the scraping, so a run estimated at $0.012 actually cost $0.050. Harmless today,
+  but it is now stored on the run and a dashboard would show it. Fixing it changes
+  the preview's response shape, so it is a decision rather than a patch.
+- **An API restart mid-run no longer self-heals.** `python -m cli reset-stuck-runs`
+  is the recovery, and nothing prompts you to run it. This is deliberate — see the
+  rule in section 6 — but the real fix is a heartbeat or owner column on `runs`,
+  which needs a migration and belongs to a later plan.
+- **CLI-created runs get no cost estimate**, only API-created ones. A visible
+  asymmetry if both appear in one list.
 
 **Deliberately deferred**, none with a failure scenario today:
 
-- `datetime.utcnow()` is deprecated in 3.12 and produces naive timestamps. It is used
-  across the whole schema (~2,900 warnings in a test run). Internally consistent, so
-  nothing breaks — but it should be the first commit after this branch merges, done as
-  one sweep rather than file by file.
-- `Stage.select` ignores `run_id`, and the per-segment scrape cap is now cumulative,
-  so a **second vertical would count HVAC leftovers against its own caps**. The fix is
-  a `Business.vertical` filter, not a run filter. Latent until vertical #2 — which
-  means it belongs to whoever adds one.
-- A retried scrape re-fetches pages that already succeeded, billing them twice. Now at
-  least logged honestly.
-- A business whose enrichment repeatedly half-fails can be re-enriched on later runs.
-  This is the deliberate trade for not stranding it permanently.
-- `Outcome` has no database-level unique constraint on `business_id`; the upsert is
-  check-then-insert, which is safe only because the CLI is single-process.
-- Smaller: 408 handling in one client, `RunPermanentError` leaving no `error_message`,
-  overnight opening hours (`8 PM–2 AM`) treated as unparseable.
+- `datetime.utcnow()` is deprecated in 3.12 and used across the whole schema. It is
+  internally consistent, so nothing breaks — but it should be the first commit after
+  this branch merges, done as one sweep.
+- `Stage.select` ignores `run_id`, and the per-segment scrape cap is cumulative, so
+  a **second vertical would count the first one's leftovers against its caps**. The
+  fix is a `Business.vertical` filter. Latent until vertical #2.
+- A retried scrape re-fetches pages that already succeeded, billing them twice.
+- The Dockerfile runs as root; the compose services have no restart policy.
+- Smaller: an auth-sweep test blind to routes hidden from the schema; a duplicated
+  business lookup; an observer crash labelled with the wrong stage name.
 
-**Not built yet:** the FastAPI routers, the scheduler, and the Next.js dashboard.
-Those are Plan 2, which has not been written.
+**Not built yet:** the Next.js dashboard. That is Plan 3, which has not been written.
 
-**Machine note:** Homebrew's `postgresql@14` was stopped during this work because it
-occupied port 5432 and blocked the Docker database. Starting it again will break this
-project until you stop it once more.
+**Machine note:** Homebrew's `postgresql@14` was stopped because it occupied port
+5432 and blocked the Docker database. Starting it again breaks this project until
+you stop it once more. Moving this project to 5433 would end that permanently.
 
 ---
 
@@ -307,7 +350,7 @@ cd backend
 pip install -e ".[dev]"
 cp .env.example .env             # fill in SERPER_KEY, FIRECRAWL_KEY, SERPAPI_KEY
 alembic upgrade head
-pytest                           # 181 tests, no API keys needed
+pytest                           # 309 tests, no API keys needed
 lint-imports                     # enforces the domain-layer boundary
 ```
 
@@ -322,6 +365,6 @@ excluded by default.
 |---|---|
 | Why is it built this way? | `docs/decisions/DECISIONS.md` |
 | What is the full design? | `docs/superpowers/specs/2026-08-27-lead-generation-system-design.md` |
-| What is left to build? | Plan 2 — not yet written (API, scheduler, dashboard) |
+| What is left to build? | Plan 3 — the Next.js dashboard, not yet written |
 | What happened during the build? | the `git log` — one commit per feature, `fix:` where a review found something |
 | How is a business scored? | `backend/config/rulesets/hvac_v1.yaml` |
