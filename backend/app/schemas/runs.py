@@ -15,6 +15,10 @@ class RunCreate(BaseModel):
     state: str | None = None
     location: str | None = None
     pages: int = Field(default=5, ge=1, le=20)
+    # Omitting this does NOT mean "no ceiling". `create_run` substitutes
+    # `Settings.default_run_max_cost_usd`, because the common case is a
+    # client that leaves it out and an unbounded run is exactly what the
+    # HTTP path must not make easy (I5). Pass a value to override it.
     max_cost_usd: float | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")

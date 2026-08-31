@@ -187,3 +187,35 @@ def test_post_runs_persists_the_cost_estimate_the_preview_computed(client,
     assert created.json()["estimated_cost"] == expected > 0
     assert session.query(Run).filter_by(
         id=created.json()["id"]).one().estimated_cost == expected
+
+
+def test_post_runs_applies_a_server_side_cost_ceiling_when_none_is_given(
+        client, session):
+    """I5: `max_cost_usd` is optional with no server default, so the common
+    case -- a client that omits it -- queued a run with no ceiling at all.
+
+    Before this branch, spending required a human at a terminal; the HTTP
+    path removes that. Per-run cost is structurally bounded (verticals and
+    states come from config, `pages` caps at 20), so this is not about the
+    worst single run -- it is that a UI retry loop can queue runs nobody
+    is watching. The ceiling comes from settings so an operator can raise
+    it without a code change.
+    """
+    from app.core.config import get_settings
+
+    r = client.post("/runs", json={"vertical": "hvac",
+                                   "location": "Houston, TX"})
+
+    assert r.status_code == 201
+    ceiling = get_settings().default_run_max_cost_usd
+    assert ceiling > 0
+    assert r.json()["max_cost_usd"] == ceiling
+    assert session.query(Run).filter_by(
+        id=r.json()["id"]).one().max_cost_usd == ceiling
+
+
+def test_an_explicit_ceiling_still_wins_over_the_default(client):
+    r = client.post("/runs", json={"vertical": "hvac",
+                                   "location": "Houston, TX",
+                                   "max_cost_usd": 0.25})
+    assert r.json()["max_cost_usd"] == 0.25

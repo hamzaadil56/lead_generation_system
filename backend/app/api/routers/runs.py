@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
+from app.core.config import get_settings
 from app.models.run import Run
 from app.repositories.runs import get_run, list_runs
 from app.schemas.common import Page
@@ -54,7 +55,11 @@ def create_run(body: RunCreate, db: Session = Depends(get_db)) -> RunOut:
     run = Run(status="queued", source="ui",
               search_plan={"vertical": body.vertical, "state": body.state,
                            "location": body.location, "pages": body.pages},
-              max_cost_usd=body.max_cost_usd,
+              # `is not None`, not `or`: the schema bounds this field
+              # `gt=0` today, but `or` would quietly swallow a 0 if that
+              # ever relaxes -- and "spend nothing" is a real request.
+              max_cost_usd=(body.max_cost_usd if body.max_cost_usd is not None
+                            else get_settings().default_run_max_cost_usd),
               estimated_cost=preview.estimated_cost_usd,
               created_at=datetime.utcnow())
     db.add(run)
