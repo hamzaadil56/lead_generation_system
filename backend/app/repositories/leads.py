@@ -7,9 +7,9 @@ from sqlalchemy.orm import Query, Session
 
 from app.models.business import Business
 from app.models.derived import Review, Score, Signals
-from app.models.manual import Outcome
-from app.schemas.leads import (EvidenceOut, LeadDetailOut, LeadOut, ReasonOut,
-                               ScoreOut)
+from app.models.manual import ManualFacts, Outcome
+from app.schemas.leads import (EvidenceOut, LeadDetailOut, LeadOut,
+                               ManualFactsOut, ReasonOut, ScoreOut)
 
 DEFAULT_RULESET = "hvac_v1"
 
@@ -147,5 +147,13 @@ def get_lead_detail(session: Session, cid: str,
         if r.text
     ]
 
-    return LeadDetailOut(lead=lead, score=score_out, reasons=reasons,
-                         signals=signals, evidence=evidence)
+    # Read back what a human typed. The `manual_facts` overlay in
+    # ExtractSignalsStage only reaches `signals` on the next pipeline run, so
+    # the Signals row is not a read path for a value saved a second ago.
+    facts = (session.query(ManualFacts)
+             .filter_by(business_id=business.id).one_or_none())
+
+    return LeadDetailOut(
+        lead=lead, score=score_out, reasons=reasons, signals=signals,
+        evidence=evidence,
+        manual_facts=ManualFactsOut.model_validate(facts) if facts else None)

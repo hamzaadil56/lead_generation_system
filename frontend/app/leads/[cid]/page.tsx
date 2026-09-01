@@ -32,6 +32,9 @@ export default async function LeadDetail({
   }
 
   const { lead, score, reasons, signals, evidence } = detail;
+  // Prefill from what is stored: an empty form would both hide the saved
+  // values and null every untouched column on the next save.
+  const facts = detail.manual_facts;
 
   async function saveOutcome(form: FormData) {
     "use server";
@@ -139,22 +142,27 @@ export default async function LeadDetail({
               <div className="space-y-2">
                 <Label htmlFor="estimated_employees">Estimated employees</Label>
                 <Input id="estimated_employees" name="estimated_employees"
-                       type="number" min={0} max={100000} />
+                       type="number" min={0} max={100000}
+                       defaultValue={facts?.estimated_employees ?? ""} />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="technician_count">Technicians</Label>
                 <Input id="technician_count" name="technician_count"
-                       type="number" min={0} max={10000} />
+                       type="number" min={0} max={10000}
+                       defaultValue={facts?.technician_count ?? ""} />
               </div>
               <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" name="has_office_admin" /> Has an office admin
+                <input type="checkbox" name="has_office_admin"
+                       defaultChecked={facts?.has_office_admin ?? false} /> Has an office admin
               </label>
               <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" name="owner_growth_focused" /> Owner is growth-focused
+                <input type="checkbox" name="owner_growth_focused"
+                       defaultChecked={facts?.owner_growth_focused ?? false} /> Owner is growth-focused
               </label>
               <div className="space-y-2">
                 <Label htmlFor="facts-notes">Notes</Label>
-                <Textarea id="facts-notes" name="notes" rows={3} />
+                <Textarea id="facts-notes" name="notes" rows={3}
+                          defaultValue={facts?.notes ?? ""} />
               </div>
               <Button type="submit">Save facts</Button>
             </form>

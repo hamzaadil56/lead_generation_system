@@ -33,6 +33,15 @@ export type EvidenceOut = {
   text: string; rating: number | null; published_at: string | null;
 };
 
+/** What a human already typed. Read-back for PUT /leads/{cid}/manual-facts. */
+export type ManualFactsOut = {
+  estimated_employees: number | null;
+  technician_count: number | null;
+  has_office_admin: boolean | null;
+  owner_growth_focused: boolean | null;
+  notes: string | null;
+};
+
 export type LeadDetailOut = {
   lead: LeadOut;
   score: ScoreOut | null;        // null = not scored yet. BRANCH ON THIS,
@@ -41,6 +50,7 @@ export type LeadDetailOut = {
   reasons: ReasonOut[];
   signals: Record<string, unknown>;   // null value = UNKNOWN, not false
   evidence: EvidenceOut[];
+  manual_facts: ManualFactsOut | null;   // null = nothing entered yet
 };
 
 export type RunOut = {
