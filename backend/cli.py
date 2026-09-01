@@ -24,6 +24,7 @@ from app.services.rulesets import read_ruleset_definition, read_ruleset_file
 from app.services.run_executor import (
     Providers, budget_guard, execute_run)
 from app.services.search_plan import build_search_plan
+from app.services.seed import seed_demo
 
 app = typer.Typer()
 CONFIG = Path("config")
@@ -239,6 +240,18 @@ def reset_stuck_runs_cmd(
 def spend(run_id: int | None = None) -> None:
     with get_session() as s:
         typer.echo(f"${spend_usd(s, run_id):.2f}")
+
+
+@app.command("seed-demo")
+def seed_demo_cmd() -> None:
+    """Insert a fixed demo dataset for end-to-end tests and local demos.
+
+    Idempotent. Intended for a throwaway database -- never run it against
+    one holding real run data.
+    """
+    with get_session() as s:
+        counts = seed_demo(s)
+    typer.echo(f"seeded: {counts}")
 
 
 if __name__ == "__main__":
