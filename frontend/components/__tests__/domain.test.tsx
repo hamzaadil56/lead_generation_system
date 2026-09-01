@@ -14,6 +14,19 @@ it("ScorePair always shows both numbers, labelled", () => {
   expect(screen.getByLabelText(/fit 82, pain 41/i)).toBeInTheDocument();
 });
 
+// A real `cold` lead can score 0 on either axis, so 0 is a value the
+// component must render, not a falsy blank. Mutating score-pair.tsx to
+// `{fit || null}` -- dropping the number entirely -- used to leave the
+// whole suite green, because every fixture in it scored non-zero.
+it.each([
+  [0, 0], [0, 41], [82, 0],
+])("ScorePair renders a zero score as 0, not as blank (fit=%i pain=%i)",
+   (fit, pain) => {
+  const { container } = render(<ScorePair fit={fit} pain={pain} />);
+  expect(container.textContent).toBe(`${fit}/${pain}`);
+  expect(screen.getByLabelText(`Fit ${fit}, pain ${pain}`)).toBeInTheDocument();
+});
+
 it.each([
   ["go_now", "Go now"], ["nurture", "Nurture"],
   ["low_fit", "Low fit"], ["cold", "Cold"],
