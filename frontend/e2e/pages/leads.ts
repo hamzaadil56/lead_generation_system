@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { Page, expect } from "@playwright/test";
 
 export class LeadsPage {
@@ -9,6 +10,18 @@ export class LeadsPage {
   }
   async openFirstLead() {
     await this.rows().first().getByRole("link").click();
+  }
+  async filterByOutcome(status: string) {
+    await this.page.getByRole("link", { name: status, exact: true }).click();
+  }
+  /** Click Export CSV and hand back the file's data rows (header dropped). */
+  async exportCsvRows(): Promise<string[]> {
+    const [download] = await Promise.all([
+      this.page.waitForEvent("download"),
+      this.page.getByRole("link", { name: "Export CSV" }).click(),
+    ]);
+    const path = await download.path();
+    return readFileSync(path, "utf-8").trim().split("\n").slice(1);
   }
   async expectEmptyState() {
     await expect(this.page.getByText(/no leads match/i)).toBeVisible();

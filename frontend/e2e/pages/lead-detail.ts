@@ -1,4 +1,4 @@
-import { Page, expect } from "@playwright/test";
+import { Locator, Page, expect } from "@playwright/test";
 
 export class LeadDetailPage {
   constructor(private page: Page) {}
@@ -28,6 +28,24 @@ export class LeadDetailPage {
   }
   async setEmployees(n: number) {
     await this.page.getByLabel("Estimated employees").fill(String(n));
+    await this.save("Save facts");
+  }
+
+  /** The three-state control for a `bool | null` manual fact. Not a checkbox:
+   *  a checkbox cannot hold "unknown". */
+  fact(label: string): Locator { return this.page.getByLabel(label); }
+  factsNotes(): Locator {
+    return this.page.getByRole("button", { name: "Save facts" })
+      .locator("xpath=ancestor::form").getByLabel("Notes");
+  }
+  async setFacts(values: Record<string, string>) {
+    for (const [label, value] of Object.entries(values)) {
+      await this.fact(label).selectOption(value);
+    }
+    await this.save("Save facts");
+  }
+  async setFactsNotes(text: string) {
+    await this.factsNotes().fill(text);
     await this.save("Save facts");
   }
 }

@@ -13,5 +13,10 @@ export class NewSearchPage {
     await expect(this.page.getByText(/searches/)).toBeVisible();
     await expect(this.page.getByText(/estimated search cost/i)).toBeVisible();
   }
+  /** The one control in the product that spends money. */
+  async start() {
+    await this.page.getByRole("button", { name: "Start this run" }).click();
+    await this.page.waitForURL(/\/runs/);
+  }
   async cancel() { await this.page.getByRole("link", { name: "Cancel" }).click(); }
 }
