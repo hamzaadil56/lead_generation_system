@@ -32,4 +32,18 @@ services:
       timeout: 5s
       retries: 5
 
+  web:
+    build: ./frontend
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # Service name, not localhost: the browser talks to Next.js, and only
+      # Next.js talks to the API. The key never leaves this container.
+      API_BASE_URL: http://api:8000
+      API_KEY: ${API_KEY:-}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-changeme}
+      SESSION_SECRET: ${SESSION_SECRET:-dev-secret-at-least-32-characters!!}
+    ports: ["3000:3000"]
+
 volumes: { pgdata: }

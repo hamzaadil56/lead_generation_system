@@ -1,9 +1,11 @@
 # Development Log — Lead Pipeline Core
 
-**Last updated:** 2026-08-31
-**Branch:** `feat/api-and-scheduler` (25 commits off `main`, not yet merged)
-**Status:** backend pipeline, HTTP API, and scheduler all complete and reviewed —
-309 tests pass, `mypy` clean. Not yet run against live APIs; no UI yet.
+**Last updated:** 2026-09-01
+**Branch:** `feat/dashboard` (not yet merged)
+**Status:** backend pipeline, HTTP API, scheduler, and the Next.js dashboard all
+complete and reviewed — 320 backend tests, 60 frontend tests, and an 18-case
+Playwright suite against the live stack all pass; `mypy` and `tsc` clean. Not
+yet run against live provider APIs.
 
 This document explains, in plain language, what exists in this repository and why.
 If you are picking the project back up after time away, read this first.
@@ -34,9 +36,10 @@ Three phases, in order. Each one produced a document that the next one used.
 | Planning | `docs/superpowers/plans/2026-08-29-lead-pipeline-core.md` — 17 numbered build tasks | Approved |
 | Building (Plan 1) | The pipeline in `backend/` — 17 tasks | Complete, reviewed, merged |
 | Building (Plan 2) | The API and scheduler — 11 tasks | Complete, reviewed |
+| Building (Plan 3) | `docs/superpowers/plans/2026-09-01-dashboard.md` — the Next.js dashboard, 9 tasks | Complete, reviewed |
 
 Every design choice made along the way is written down in
-`docs/decisions/DECISIONS.md` — 23 numbered decisions, each in the form
+`docs/decisions/DECISIONS.md` — 27 numbered decisions, each in the form
 *Context → Decision → Why → Consequences*. When you wonder "why is it done this
 way", that file is the answer, not this one.
 
@@ -152,11 +155,25 @@ backend/
   config/          verticals, locations, and the scoring ruleset
   tests/           181 test cases
   alembic/         database migrations
+frontend/                        the Next.js 16 dashboard (App Router)
+  app/                             the five screens: /login, /leads,
+                                   /leads/[cid], /runs, /runs/new, plus the
+                                   /api/export CSV proxy
+  components/                      shadcn/ui primitives plus the five domain
+                                   components (ScorePair, QuadrantBadge,
+                                   CoverageIndicator, EvidenceQuote, SignalBadge)
+  lib/                             api.ts — the ONLY path to the backend, and
+                                   the only place the API key exists; auth.ts,
+                                   types.ts, format.ts
+  middleware.ts                    the password gate: everything but /login
+  e2e/                             Playwright specs and page objects, run
+                                   against the real seeded backend
+  Dockerfile                       standalone build, served by `node server.js`
 docs/
   decisions/DECISIONS.md          why every choice was made
   superpowers/specs/              the design
   superpowers/plans/              the build plan
-docker-compose.yml                Postgres 16
+docker-compose.yml                Postgres 16, the API, and the dashboard
 ```
 
 Roughly 2,600 lines of application code and 2,600 lines of tests.
@@ -194,11 +211,30 @@ what each command does — that is what you actually need:
 | `GET /leads`, `GET /leads/{cid}` | Filtered, paginated leads and lead detail for the dashboard |
 | `PUT /leads/{cid}/outcome`, `PUT /leads/{cid}/manual-facts` | The same feedback loop and manual capture, from the API |
 
+Plan 3 adds the dashboard — a Next.js App Router frontend, nine tasks:
+
+| Screen | What it does |
+|---|---|
+| `/login` | One shared password, HMAC-signed cookie, everything else behind it |
+| `/leads` | The ranked table. Defaults to `go_now` (ADR-004), filters by quadrant and outcome, exports CSV through a server-side proxy so the API key never reaches the browser |
+| `/leads/{cid}` | Fit and pain broken down rule by rule, the review quotes behind them, the signals (with `unknown` never collapsed into `no`), and the two manual forms |
+| `/runs` | Every run, with its error, and polling while one is in flight |
+| `/runs/new` | Pick a vertical and a state, see the queries, the count and the honest search-only cost estimate, then confirm or cancel |
+
+Two screens named in the spec were deliberately cut, both with an ADR:
+ruleset compare (ADR-026's sibling — only one ruleset exists) and the contacts
+form (ADR-027 — there is no contacts endpoint). 14 of the spec's 15 frontend
+user stories are covered; each is asserted by a Playwright spec in
+`frontend/e2e/` that runs against the real seeded API, not against mocks.
+
 Plan 2 adds an in-process APScheduler, started with the app's lifespan: it polls
 every 30 seconds and executes queued runs, so `POST /runs` only enqueues — the
 scheduler is what actually calls `execute_run`.
 
-309 tests pass, `mypy app cli.py` is clean, and both import contracts hold.
+320 backend tests and 60 frontend tests pass, `mypy app cli.py` is clean,
+`tsc --noEmit` is clean, both import contracts hold, and the 18-case Playwright
+suite (14 user-story specs plus axe on four screens) passes against the running
+stack.
 The API and CLI now share one Docker image (`backend/Dockerfile`, ADR-017); `docker
 compose up db api` runs the service, and the CLI runs inside the same image via
 `docker compose run --rm api python -m cli ...`.
@@ -345,17 +381,45 @@ you stop it once more. Moving this project to 5433 would end that permanently.
 ## 8. Running it
 
 ```bash
-docker compose up -d db          # Postgres 16 on 5432
+# All three services: Postgres on 5432, the API on 8000, the dashboard on 3000.
+export API_KEY=... DASHBOARD_PASSWORD=... SESSION_SECRET=...   # 32+ chars
+docker compose up -d --build
+docker compose run --rm api alembic upgrade head
+docker compose run --rm api python -m cli seed-demo    # idempotent demo data
+open http://localhost:3000                             # sign in with DASHBOARD_PASSWORD
+```
+
+`web` reaches the API at `http://api:8000` — the compose service name, never
+`localhost`. Only the browser talks to Next.js and only Next.js talks to the
+API, so `API_KEY` lives in the `web` container's environment and is never
+prefixed `NEXT_PUBLIC_`.
+
+Backend checks, without Docker:
+
+```bash
 cd backend
 pip install -e ".[dev]"
 cp .env.example .env             # fill in SERPER_KEY, FIRECRAWL_KEY, SERPAPI_KEY
 alembic upgrade head
-pytest                           # 309 tests, no API keys needed
+pytest                           # 320 tests, no API keys needed
 lint-imports                     # enforces the domain-layer boundary
 ```
 
+Frontend checks:
+
+```bash
+cd frontend
+npm ci
+npx vitest run                   # 60 unit tests
+npx tsc --noEmit
+npx playwright test              # needs the compose stack up and seeded
+```
+
 Tests never touch the real APIs. Tests that would are marked `live` and are
-excluded by default.
+excluded by default. The Playwright suite is the exception to "no live
+services": it drives a real browser against the real `web` and `api`
+containers and the seeded database, deliberately — mocked responses would hide
+exactly the frontend/backend contract mismatches the suite exists to catch.
 
 ---
 
@@ -365,6 +429,6 @@ excluded by default.
 |---|---|
 | Why is it built this way? | `docs/decisions/DECISIONS.md` |
 | What is the full design? | `docs/superpowers/specs/2026-08-27-lead-generation-system-design.md` |
-| What is left to build? | Plan 3 — the Next.js dashboard, not yet written |
+| What is left to build? | Deployment (ADR-026), the contacts endpoint and its form (ADR-027), ruleset compare once a second ruleset exists |
 | What happened during the build? | the `git log` — one commit per feature, `fix:` where a review found something |
 | How is a business scored? | `backend/config/rulesets/hvac_v1.yaml` |

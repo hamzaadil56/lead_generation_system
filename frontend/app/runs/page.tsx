@@ -4,6 +4,13 @@ import { Button } from "@/components/ui/button";
 import { apiGet, ApiError } from "@/lib/api";
 import type { Page, RunOut } from "@/lib/types";
 
+// This screen reads no dynamic request API (no searchParams, no params), so
+// Next prerenders it at build time -- inside `docker build`, where API_BASE_URL
+// and API_KEY do not exist. The build then bakes the "Something went wrong."
+// branch below into a static page that never refetches. Force-dynamic so the
+// runs list is rendered per request, against the live API.
+export const dynamic = "force-dynamic";
+
 export default async function RunsPage() {
   let data: Page<RunOut>;
   try {

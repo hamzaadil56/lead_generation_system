@@ -718,3 +718,37 @@ who knows what is executing. (2) `run-all` creates its `Run` as `running`
 with `started_at` set, in the same transaction, so the poller's
 `status == "queued"` filter never sees a run the CLI owns. Neither needed a
 migration. Settling this properly needs a heartbeat or owner column.
+
+## ADR-026 — The dashboard runs locally in compose, not on Vercel
+
+**Context.** The spec named Vercel. The backend runs in Docker on one machine,
+holds real provider keys, and has no public URL.
+
+**Decision.** The dashboard is a third compose service (`web`) beside `db` and
+`api`, reachable at `localhost:3000`. Deployment is deferred to its own plan.
+
+**Why.** A Vercel-hosted frontend has nothing to talk to until the API is
+publicly reachable, which means a tunnel or a hosted backend plus secret
+management — real work with no bearing on whether the UI is any good. Running
+all three services together also gives Playwright the real seeded backend the
+spec's testing section calls for, with no network hop to arrange.
+
+**Consequences.** No preview deployments and no public URL. Moving to Vercel
+later needs `API_BASE_URL` repointed and the backend exposed — the code does
+not change, because every API call already goes through one server-side module.
+
+## ADR-027 — The contacts form is out of scope for the dashboard
+
+**Context.** Spec section 9 lists a contacts form on the lead detail screen and
+user story 11 covers adding a contact email. The `contacts` table exists, but
+no API endpoint serves it.
+
+**Decision.** The dashboard ships without a contacts form. Spec user story 11 is
+not implemented.
+
+**Why.** ADR-007 already deferred contact discovery to v2 — the table is the
+seam, not the feature. Building the UI would mean designing an endpoint for a
+workflow nobody has run yet, and a form that writes rows nothing reads.
+
+**Consequences.** 14 of the spec's 15 frontend user stories are covered. Adding
+contacts later needs a router, schemas, and repository reads before any UI.
