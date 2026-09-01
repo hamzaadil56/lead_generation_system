@@ -24,8 +24,21 @@ it("renders both scores for every row", () => {
 });
 
 it("shows a dash rather than a phone number when the API suppressed it", () => {
+  // This test used to assert only that the FIXTURE's own digits were absent,
+  // which any fabricated number passes. Mutating the component to render
+  // `{r.phone ?? "555-0000"}` -- a dialable number for a phone the API
+  // suppressed, a direct ADR-013 violation -- left the whole suite green.
+  // So: assert the dash is really there, and that nothing dialable reaches
+  // the row's markup at all.
   render(<LeadsTable rows={[lead({ phone: null })]} />);
-  expect(screen.queryByText(/\+1713/)).toBeNull();
+  const row = screen.getByRole("row", { name: /air tech/i });
+  // Column 6 is Phone -- see the header order in components/leads-table.
+  // The Outcome cell beside it also renders a dash, so this has to name the
+  // cell rather than search the row for the character.
+  expect(row.querySelectorAll("td")[5]).toHaveTextContent(/^\u2014$/);
+  expect(row.innerHTML).not.toMatch(/tel:/i);
+  // Any run of 7+ digits, or anything punctuated like a phone number.
+  expect(row.innerHTML).not.toMatch(/\d[\d\s().-]{5,}\d/);
 });
 
 it("has no column that sorts by review count", () => {
