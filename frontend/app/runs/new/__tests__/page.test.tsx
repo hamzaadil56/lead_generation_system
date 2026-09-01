@@ -45,3 +45,20 @@ it("does not show that message once a state is chosen and previews normally", as
   render(jsx);
   expect(screen.queryByText(/choose a state or a location/i)).toBeNull();
 });
+
+it("says the API is unreachable instead of crashing to a blank 500", async () => {
+  // The only screen of the four whose fetches were unguarded: with the API
+  // down it returned HTTP 500 with no visible error text, while /leads,
+  // /leads/[cid] and /runs all rendered "Cannot reach the API".
+  apiGetMock.mockRejectedValueOnce(new MockApiError(0, "Cannot reach the API. Is it running?"));
+  const jsx = await NewSearch({ searchParams: Promise.resolve({}) });
+  render(jsx);
+  expect(screen.getByRole("alert")).toHaveTextContent(/cannot reach the api/i);
+});
+
+it("does not show the form when the dropdown options could not be loaded", async () => {
+  apiGetMock.mockRejectedValueOnce(new MockApiError(500, "The server hit an error. Try again."));
+  const jsx = await NewSearch({ searchParams: Promise.resolve({}) });
+  render(jsx);
+  expect(screen.queryByRole("button", { name: "Preview" })).toBeNull();
+});

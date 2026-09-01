@@ -15,10 +15,23 @@ export default async function NewSearch({
   searchParams,
 }: { searchParams: Promise<Record<string, string | undefined>> }) {
   const sp = await searchParams;
-  const [verticals, states] = await Promise.all([
-    apiGet<Vertical[]>("/verticals"),
-    apiGet<State[]>("/states"),
-  ]);
+
+  // Guarded the way the other three screens are: an unreachable API has to
+  // read as visible text on the page, not as Next's blank 500. `lib/api.ts`
+  // already turns a transport failure into "Cannot reach the API" -- the
+  // screen only has to render it.
+  let verticals: Vertical[];
+  let states: State[];
+  try {
+    [verticals, states] = await Promise.all([
+      apiGet<Vertical[]>("/verticals"),
+      apiGet<State[]>("/states"),
+    ]);
+  } catch (e) {
+    return <p role="alert" className="py-12 text-center text-destructive">
+      {e instanceof ApiError ? e.detail : "Something went wrong."}
+    </p>;
+  }
 
   const body: RunCreate = {
     vertical: sp.vertical ?? verticals[0]?.name ?? "hvac",
