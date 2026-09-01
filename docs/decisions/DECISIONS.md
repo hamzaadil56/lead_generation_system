@@ -683,6 +683,28 @@ is why this ADR exists rather than a silent convention. An `import-linter`
 contract enforces the split so it cannot erode. If the pipeline ever needs a
 filtered read, that is the signal to revisit.
 
+**Amendment (dashboard fix wave).** *Services may read through
+`repositories/`.* The contract's purpose is to keep the **pipeline** out, not
+to forbid every caller — and the `import-linter` contract says exactly that:
+its `source_modules` are `app.pipeline` and `app.domain`. `app.services` is
+neither.
+
+This is load-bearing, not incidental. `app/services/export.py` selects
+through `app.repositories.leads.filtered_leads`, the same predicate and the
+same `fit x pain DESC` ordering `GET /leads` pages. It used to build its own
+`WHERE` clause, and the two drifted: the export honoured three filters while
+the list endpoint took seven, so the dashboard showed one lead and downloaded
+ten — the file disagreeing with the screen it claimed to be an export of.
+
+So: do **not** "restore layering purity" by giving the exporter its own
+query. Routing both callers through one predicate is what makes "export the
+filtered set" true by construction; two predicates is what made it false. The
+guard is
+`tests/api/test_leads_api.py::test_export_returns_the_same_rows_the_filtered_list_shows`,
+which asserts a filtered export returns the same rows, in the same order, as
+the filtered list. If the pipeline ever needs a filtered read, that is still
+the signal to revisit — that half of the split is unchanged.
+
 ## ADR-025 — The API queues runs; the scheduler executes them
 
 **Context.** `POST /runs` could execute the pipeline inline and return when

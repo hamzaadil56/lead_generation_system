@@ -54,14 +54,37 @@ it("exports the set the screen is showing, not the whole table", async () => {
   });
 });
 
-it("asks the list endpoint for exactly what it asks the export for", async () => {
-  const sp = { quadrant: "nurture", outcome_status: "won", state: "CA",
-               min_fit: "10", min_pain: "20" };
+/** Everything the list request carries except the paging, as strings, so it
+ *  can be compared whole against the export href's query. */
+function listFilters(): Record<string, string> {
+  const [, query] = apiGetMock.mock.calls[0] as [string, Record<string, unknown>];
+  return Object.fromEntries(
+    Object.entries(query)
+      .filter(([k, v]) => k !== "page" && k !== "page_size"
+                          && v !== undefined && v !== "")
+      .map(([k, v]) => [k, String(v)]));
+}
+
+it.each([
+  // Named so a failure says which filter diverged.
+  ["a filter neither side used to send", {
+    quadrant: "all", vertical: "plumbing", ruleset_version: "plumbing_v1" }],
+  ["the filters with visible controls", {
+    quadrant: "nurture", outcome_status: "won" }],
+  ["every filter at once", {
+    quadrant: "go_now", vertical: "hvac", ruleset_version: "hvac_v1",
+    state: "CA", outcome_status: "won", min_fit: "10", min_pain: "20" }],
+  ["no filters at all", {}],
+])("the export href and the list request cannot diverge: %s",
+   async (_name, sp) => {
+  // Not a hand-written key list: the first fix built the export link from
+  // LEAD_FILTER_KEYS while the list request kept its own object, so
+  // ?vertical=plumbing showed 10 rows on screen and downloaded 0 -- finding
+  // 3's failure mode inverted. Comparing the two query strings WHOLE is the
+  // only assertion that catches a key present on one side and absent on the
+  // other, whichever side grows it.
   const params = await renderLeads(sp);
-  const [, listQuery] = apiGetMock.mock.calls[0];
-  for (const key of ["quadrant", "outcome_status", "state", "min_fit", "min_pain"]) {
-    expect(params.get(key)).toBe(String(listQuery[key]));
-  }
+  expect(Object.fromEntries(params)).toEqual(listFilters());
 });
 
 it("sends no quadrant when the quadrant filter is 'all'", async () => {

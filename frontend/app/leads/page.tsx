@@ -17,27 +17,34 @@ export default async function LeadsPage({
   const quadrant = sp.quadrant ?? "go_now";
   const page = Number(sp.page ?? 1);
 
+  // ONE set of filter values, read by both the list request and the export
+  // link below. Two parallel constructions is what shipped an export that
+  // honoured one filter of five -- and then, when the link alone was rebuilt
+  // from LEAD_FILTER_KEYS while this request kept a hand-written object,
+  // reopened the same bug inverted: ?vertical=plumbing showed 10 rows on
+  // screen and downloaded 0. Anything derived from this object cannot
+  // describe a different set from anything else derived from it.
+  const filters: Record<string, string | undefined> = {};
+  for (const key of LEAD_FILTER_KEYS) filters[key] = sp[key];
+  // "all" is a word in the UI, not a value the API takes: it means no
+  // quadrant filter at all.
+  filters.quadrant = quadrant === "all" ? undefined : quadrant;
+
   let data: Page<LeadOut>;
   try {
     data = await apiGet<Page<LeadOut>>("/leads", {
-      quadrant: quadrant === "all" ? undefined : quadrant,
-      state: sp.state, outcome_status: sp.outcome_status,
-      min_fit: sp.min_fit, min_pain: sp.min_pain,
-      page, page_size: 50,
+      ...filters, page, page_size: 50,
     });
   } catch (e) {
     const msg = e instanceof ApiError ? e.detail : "Something went wrong.";
     return <p role="alert" className="py-12 text-center text-destructive">{msg}</p>;
   }
 
-  // The CSV must be the set on screen. Every filter the list request above
-  // used is forwarded; `page`/`page_size` are not, because the file is the
-  // whole filtered set rather than the page being viewed.
+  // The same filters, minus the paging: the file is the whole filtered set,
+  // not the page being viewed. `lib/api.ts` drops undefined and "" from the
+  // list request, so this drops them too.
   const exportParams = new URLSearchParams();
-  if (quadrant !== "all") exportParams.set("quadrant", quadrant);
-  for (const key of LEAD_FILTER_KEYS) {
-    if (key === "quadrant") continue;      // handled above: "all" means none
-    const value = sp[key];
+  for (const [key, value] of Object.entries(filters)) {
     if (value) exportParams.set(key, value);
   }
   const exportHref = `/api/export?${exportParams.toString()}`;
