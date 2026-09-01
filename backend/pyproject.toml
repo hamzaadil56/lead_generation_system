@@ -11,10 +11,19 @@ dependencies = [
   # requests.RequestException to tell a transport failure apart from a
   # dead target site. It was already installed transitively.
   "requests>=2.31",
+  "fastapi>=0.115", "uvicorn[standard]>=0.30", "apscheduler>=3.10",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-cov", "mypy>=1.9", "import-linter>=2.0", "ruff>=0.4"]
+dev = ["pytest>=8.0", "pytest-cov", "mypy>=1.9", "import-linter>=2.0", "ruff>=0.4", "types-pyyaml"]
+
+# setuptools' flat-layout auto-discovery sees `app/`, `config/`, and
+# `alembic/` all sitting at the backend root and refuses to guess which
+# are packages ("Multiple top-level packages discovered in a flat-layout").
+# `config` and `alembic` are data/migrations, not importable packages --
+# only `app` (and its subpackages) should ever be installed.
+[tool.setuptools.packages.find]
+include = ["app*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -33,7 +42,8 @@ plugins = ["pydantic.mypy"]
 # None of these ship type information (no py.typed, no stub package
 # installed). Only their imports are silenced; our own use of them is
 # still checked as `Any`.
-module = ["yaml", "yaml.*", "serpapi", "serpapi.*", "firecrawl", "firecrawl.*"]
+module = ["yaml", "yaml.*", "serpapi", "serpapi.*", "firecrawl", "firecrawl.*",
+          "apscheduler", "apscheduler.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

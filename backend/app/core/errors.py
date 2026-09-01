@@ -33,6 +33,21 @@ class BudgetExceeded(Exception):
     """
 
 
+class SearchPlanError(ValueError):
+    """A vertical or state that is not in config -- a client mistake.
+
+    Subclasses ValueError so existing `except ValueError` callers (and the
+    generic setup handler in `execute_run`) keep working, but it is a
+    NAMED type so the API can render exactly this as a 400. The app used
+    to handle bare `ValueError`, and `pydantic.ValidationError` subclasses
+    `ValueError`: every server-side DTO failure inside a router became a
+    400 with the raw pydantic message -- internal field names, type
+    errors, and truncated input values -- in the response body. That is
+    what disguised a broken response schema as a bad request (C1/I1).
+    Nothing else may be widened back into that handler.
+    """
+
+
 class RulesetVersionConflict(Exception):
     """A `rulesets` row already exists for this version with different
     content. Scoring must not proceed: it would overwrite every Score row

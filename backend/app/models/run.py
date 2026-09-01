@@ -13,8 +13,13 @@ class Run(Base):
     status: Mapped[str] = mapped_column(String)  # queued|running|complete|failed
     source: Mapped[str] = mapped_column(String)  # ui|cli
     search_plan: Mapped[dict] = mapped_column(JSON)  # a Run is always created from a SearchPlan
-    # nullable: end-of-run counts ({searched, found, new}); absent while the
-    # run is still `queued`/`running` and only written on completion.
+    # nullable: end-of-run counts, written by `_terminal` in
+    # app/services/run_executor.py when the run reaches ANY terminal state
+    # (complete or failed) -- the failure counts say how far the run got.
+    # Absent while `queued`/`running`, and on a setup failure, where no
+    # stage ran. Shape: {"stages": [{stage, processed, failed, aborted,
+    # reason}, ...], "processed": int, "failed": int}; `stages` is an
+    # ordered list because extract and score each appear twice (ADR-020).
     stats: Mapped[dict | None] = mapped_column(JSON)
     max_cost_usd: Mapped[float | None] = mapped_column(Float)
     estimated_cost: Mapped[float | None] = mapped_column(Float)

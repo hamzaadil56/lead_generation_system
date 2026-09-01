@@ -207,9 +207,14 @@ queues — real capabilities — at the cost of Redis, worker processes, and a
 much harder debugging story. One container, no broker.
 
 **Consequences.** A container restart kills an in-flight run; the status
-machine makes recovery a re-run, and stuck runs self-heal on startup. Two
-FastAPI instances would double-execute — fix at that point is a Postgres
-advisory lock.
+machine makes recovery a re-run. Stuck runs do **not** self-heal: an
+operator requeues them with `python -m cli reset-stuck-runs` (amended
+2026-08-31 — see ADR-025's amendment). Two FastAPI instances would not
+double-execute *through the claim path* (`SELECT ... FOR UPDATE SKIP
+LOCKED`), but nothing prevents two processes from executing the same run
+once something has put it back to `queued` while it is still in flight —
+which is why no automatic reconciler exists. A heartbeat or owner column
+is the shape of a real fix.
 
 ---
 
@@ -651,3 +656,65 @@ elements. `royalair` is the deliberate negative case (no chat, no ads).
   Tracked, not scored, which was already the decision in ADR-021.
 - Fingerprints are metro- and vertical-specific. Re-run this capture when
   adding a vertical or a very different market.
+
+---
+
+## ADR-024 — A read-only `repositories/` layer, for the API only
+
+**Context.** The spec's dependency rule is `api -> services -> repositories
+-> database`, but Plan 1 built no repositories: each pipeline stage queries
+the session directly. Adding the layer now meant either refactoring five
+reviewed, working stages or leaving the codebase with two data-access styles.
+
+**Decision.** Introduce `app/repositories/` for the API's **read** paths
+only — filtered, paginated queries the UI needs. The pipeline's
+stage-scoped writes stay exactly as they are. `repositories/` never writes,
+and `app/pipeline/` never imports it.
+
+**Why.** The two have genuinely different shapes. A stage reads "every row
+in status X" and writes it forward; the API reads "page 3 of go_now leads in
+Texas, sorted by fit x pain". Forcing both through one abstraction would
+serve neither. The alternative — refactoring the pipeline — would rewrite
+the data access of code that had just passed review, with 181 tests to
+rework, for no behavioural gain.
+
+**Consequences.** Two data-access styles coexist, which is a real cost and
+is why this ADR exists rather than a silent convention. An `import-linter`
+contract enforces the split so it cannot erode. If the pipeline ever needs a
+filtered read, that is the signal to revisit.
+
+## ADR-025 — The API queues runs; the scheduler executes them
+
+**Context.** `POST /runs` could execute the pipeline inline and return when
+it finished. A full run takes minutes.
+
+**Decision.** `POST /runs` creates the run with `status="queued"` and returns
+201 immediately. APScheduler polls every 30 seconds, claims one queued run
+with `SELECT ... FOR UPDATE SKIP LOCKED`, and calls `execute_run`.
+
+**Why.** No HTTP client, proxy, or platform load balancer will hold a
+connection open for a multi-minute run. Queueing also makes the run
+inspectable while it happens -- the UI polls `GET /runs/{id}` -- and makes a
+crashed process recoverable, because `reset_stuck_runs` can requeue
+anything left `running`. `SKIP LOCKED` makes the *claim* safe against a
+second poller, which the spec had listed as a known limitation requiring an
+advisory lock.
+
+**Consequences.** A run does not start the instant it is created; worst case
+it waits 30 seconds. The UI must poll rather than block. `Run.status` is now
+load-bearing for scheduling, not just for display.
+
+**Amendment (2026-08-31).** The original text claimed `reset_stuck_runs` ran
+at startup and that `SKIP LOCKED` made a second instance safe outright. Both
+overclaimed. `SKIP LOCKED` protects the claim query only; requeuing a run
+that is still executing elsewhere puts it back in the pool and a poller
+re-claims it, so both processes walk all seven stages against one `run_id`.
+ADR-017 makes that concrete: the CLI is a second entrypoint into the same
+image and database, so a restarting API container could requeue a live CLI
+run. Two changes followed. (1) `reset_stuck_runs` is no longer called
+automatically — not on a timer, not at startup; it is
+`python -m cli reset-stuck-runs --older-than-hours N`, run by an operator
+who knows what is executing. (2) `run-all` creates its `Run` as `running`
+with `started_at` set, in the same transaction, so the poller's
+`status == "queued"` filter never sees a run the CLI owns. Neither needed a
+migration. Settling this properly needs a heartbeat or owner column.

@@ -15,3 +15,12 @@ forbidden_modules =
     app.models
     app.clients
     app.repositories
+
+[importlinter:contract:repositories-are-api-only]
+name = The pipeline never reads through repositories (ADR-024)
+type = forbidden
+source_modules =
+    app.pipeline
+    app.domain
+forbidden_modules =
+    app.repositories
