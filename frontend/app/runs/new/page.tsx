@@ -1,12 +1,12 @@
-import { redirect } from "next/navigation";
 import Link from "next/link";
 import { ConfirmPanel } from "@/components/new-search-form";
+import { QueueRunForm } from "@/components/queue-run-form";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { apiGet, apiSend, ApiError } from "@/lib/api";
-import type { PreviewOut, RunOut } from "@/lib/types";
+import type { PreviewOut, RunCreate } from "@/lib/types";
 
 type Vertical = { name: string; search_terms: string[]; ruleset: string };
 type State = { code: string; metros: string[] };
@@ -20,28 +20,29 @@ export default async function NewSearch({
     apiGet<State[]>("/states"),
   ]);
 
-  const body = {
+  const body: RunCreate = {
     vertical: sp.vertical ?? verticals[0]?.name ?? "hvac",
     state: sp.state || null,
     location: sp.location || null,
     pages: Number(sp.pages ?? 5),
   };
   const ready = Boolean(body.state || body.location);
+  const confirming = sp.confirm === "1";
 
   let preview: PreviewOut | null = null;
   let error: string | null = null;
-  if (sp.confirm === "1" && ready) {
+  let missingLocation: string | null = null;
+  if (confirming && ready) {
     try {
       preview = await apiSend<PreviewOut>("POST", "/runs/preview", body);
     } catch (e) {
       error = e instanceof ApiError ? e.detail : "Could not build a preview.";
     }
-  }
-
-  async function queue() {
-    "use server";
-    const run = await apiSend<RunOut>("POST", "/runs", body);
-    redirect(`/runs?highlight=${run.id}`);
+  } else if (confirming && !ready) {
+    // The API requires one of state or location and would 422 on neither.
+    // Catch that here instead of sending a request known to fail, so the
+    // screen explains itself rather than silently doing nothing.
+    missingLocation = "Choose a state or a location before previewing a search.";
   }
 
   return (
@@ -85,6 +86,7 @@ export default async function NewSearch({
         </CardContent>
       </Card>
 
+      {missingLocation && <p role="alert" className="text-destructive">{missingLocation}</p>}
       {error && <p role="alert" className="text-destructive">{error}</p>}
 
       {preview && (
@@ -93,9 +95,7 @@ export default async function NewSearch({
           <CardContent className="space-y-4">
             <ConfirmPanel preview={preview} />
             <div className="flex gap-2">
-              <form action={queue}>
-                <Button type="submit">Start this run</Button>
-              </form>
+              <QueueRunForm body={body} />
               <Button variant="outline" render={<Link href="/runs" />}>Cancel</Button>
             </div>
           </CardContent>
