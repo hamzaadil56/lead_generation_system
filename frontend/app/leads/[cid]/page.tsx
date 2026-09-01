@@ -6,12 +6,14 @@ import { EvidenceQuote } from "@/components/evidence-quote";
 import { ReasonList, SignalList } from "@/components/lead-forms";
 import { QuadrantBadge } from "@/components/quadrant-badge";
 import { ScorePair } from "@/components/score-pair";
+import { TriStateField } from "@/components/tri-state-field";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { apiGet, apiSend, ApiError } from "@/lib/api";
+import { triStateToBool } from "@/lib/tri-state";
 import type { LeadDetailOut } from "@/lib/types";
 
 const OUTCOMES = ["new", "contacted", "replied", "booked", "won", "lost"];
@@ -54,8 +56,10 @@ export default async function LeadDetail({
     await apiSend("PUT", `/leads/${encodeURIComponent(cid)}/manual-facts`, {
       estimated_employees: num("estimated_employees"),
       technician_count: num("technician_count"),
-      has_office_admin: form.get("has_office_admin") === "on",
-      owner_growth_focused: form.get("owner_growth_focused") === "on",
+      // Three-state, not a checkbox: `null` means nobody has researched
+      // this, and must stay reachable. See lib/tri-state.ts.
+      has_office_admin: triStateToBool(form.get("has_office_admin")),
+      owner_growth_focused: triStateToBool(form.get("owner_growth_focused")),
       notes: String(form.get("notes") || "") || null,
     });
     revalidatePath(`/leads/${cid}`);
@@ -151,14 +155,11 @@ export default async function LeadDetail({
                        type="number" min={0} max={10000}
                        defaultValue={facts?.technician_count ?? ""} />
               </div>
-              <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" name="has_office_admin"
-                       defaultChecked={facts?.has_office_admin ?? false} /> Has an office admin
-              </label>
-              <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" name="owner_growth_focused"
-                       defaultChecked={facts?.owner_growth_focused ?? false} /> Owner is growth-focused
-              </label>
+              <TriStateField name="has_office_admin" label="Has an office admin"
+                             value={facts?.has_office_admin} />
+              <TriStateField name="owner_growth_focused"
+                             label="Owner is growth-focused"
+                             value={facts?.owner_growth_focused} />
               <div className="space-y-2">
                 <Label htmlFor="facts-notes">Notes</Label>
                 <Textarea id="facts-notes" name="notes" rows={3}
