@@ -49,8 +49,16 @@ def _row_to_lead(business: Business, score: Score,
     )
 
 
-def _filtered(session: Session,
-             filters: LeadFilters) -> "Query[Any]":
+def filtered_leads(session: Session,
+                   filters: LeadFilters) -> "Query[Any]":
+    """The one place a lead filter is expressed.
+
+    Public because `app.services.export` builds the CSV from the same
+    predicate: the export is specified as "the filtered set" (spec section 9
+    screen 3), and it shipped honouring three of the five filters the list
+    endpoint takes, so the screen said one lead and the file held ten. Two
+    copies of this WHERE clause is exactly how that happened.
+    """
     q = (session.query(Business, Score, Outcome.status)
          .join(Score, Score.business_id == Business.id)
          .outerjoin(Outcome, Outcome.business_id == Business.id)
@@ -77,7 +85,7 @@ def list_leads(session: Session, filters: LeadFilters, page: int = 1,
     number (ADR-004). NOT ordered by review_count -- ADR-022 forbids
     ratingCount acting as anything but a label.
     """
-    q = _filtered(session, filters)
+    q = filtered_leads(session, filters)
     total = q.with_entities(func.count()).order_by(None).scalar() or 0
     rows = (q.order_by((Score.fit_score * Score.pain_score).desc(),
                        Business.id)

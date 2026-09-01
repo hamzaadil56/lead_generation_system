@@ -79,3 +79,36 @@ def test_export_is_parameterised_by_ruleset_version(session, tmp_path):
     assert export_leads(session, None, 0, out) == 0            # hvac_v1 default
     assert export_leads(session, None, 0, out,
                         ruleset_version="plumbing_v1") == 1
+
+
+def test_export_honours_the_filters_added_for_the_dashboard(session, tmp_path):
+    """`export_leads` took quadrant/min_fit/ruleset_version only, so the
+    dashboard's Export CSV shipped the whole table under a URL that claimed
+    to be filtered. These four are the rest of what `GET /leads` accepts."""
+    from app.models.manual import Outcome
+
+    tx = Business(cid="c1", name="TX Air", state="TX", vertical="hvac",
+                  status=BusinessStatus.SCORED, phone_is_valid=False)
+    ca = Business(cid="c2", name="CA Air", state="CA", vertical="plumbing",
+                  status=BusinessStatus.SCORED, phone_is_valid=False)
+    session.add_all([tx, ca])
+    session.flush()
+    for b, pain in ((tx, 80), (ca, 10)):
+        session.add(Score(business_id=b.id, ruleset_version="hvac_v1",
+                          fit_score=80, pain_score=pain, quadrant="go_now",
+                          coverage=0.9, reasons=[]))
+    session.add(Outcome(business_id=tx.id, status="contacted", source="manual"))
+    session.commit()
+
+    out = tmp_path / "leads.csv"
+    assert export_leads(session, None, 0, out) == 2                  # unfiltered
+    assert export_leads(session, None, 0, out, state="CA") == 1
+    assert export_leads(session, None, 0, out, min_pain=50) == 1
+    assert export_leads(session, None, 0, out, vertical="plumbing") == 1
+    assert export_leads(session, None, 0, out,
+                        outcome_status="contacted") == 1
+    assert export_leads(session, None, 0, out, outcome_status="won") == 0
+    # And the names really are the filtered ones, not just the right count.
+    export_leads(session, None, 0, out, state="CA")
+    assert [r["name"] for r in csv.DictReader(out.open(encoding="utf-8"))] \
+        == ["CA Air"]

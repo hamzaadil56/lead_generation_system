@@ -40,15 +40,28 @@ def list_leads_endpoint(
 
 @router.get("/export.csv")
 def export_csv(quadrant: str | None = None,
+               vertical: str | None = None,
+               state: str | None = None,
                min_fit: int = Query(0, ge=0, le=100),
+               min_pain: int = Query(0, ge=0, le=100),
+               outcome_status: str | None = None,
                ruleset_version: str = DEFAULT_RULESET,
                db: Session = Depends(get_db)) -> Response:
     """Reuses the CLI's exporter so the CSV the UI downloads is byte-identical
-    to the one `python -m cli export` writes."""
+    to the one `python -m cli export` writes.
+
+    Takes EVERY filter `GET /leads` takes, and validates them identically.
+    FastAPI silently ignores query params an endpoint does not declare, so a
+    filter missing here does not fail -- it exports the unfiltered table under
+    a URL that says otherwise, which is how "1 lead on screen, 10 in the file"
+    shipped.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "leads.csv"
         export_leads(db, quadrant, min_fit, path,
-                     ruleset_version=ruleset_version)
+                     ruleset_version=ruleset_version,
+                     vertical=vertical, state=state, min_pain=min_pain,
+                     outcome_status=outcome_status)
         content = path.read_text(encoding="utf-8")
     return Response(
         content=content, media_type="text/csv",

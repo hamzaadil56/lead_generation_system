@@ -2,6 +2,7 @@ import Link from "next/link";
 import { LeadsTable } from "@/components/leads-table";
 import { Button } from "@/components/ui/button";
 import { apiGet, ApiError } from "@/lib/api";
+import { LEAD_FILTER_KEYS } from "@/lib/filters";
 import type { LeadOut, Page } from "@/lib/types";
 
 const QUADRANTS = ["go_now", "nurture", "low_fit", "cold"];
@@ -28,6 +29,18 @@ export default async function LeadsPage({
     return <p role="alert" className="py-12 text-center text-destructive">{msg}</p>;
   }
 
+  // The CSV must be the set on screen. Every filter the list request above
+  // used is forwarded; `page`/`page_size` are not, because the file is the
+  // whole filtered set rather than the page being viewed.
+  const exportParams = new URLSearchParams();
+  if (quadrant !== "all") exportParams.set("quadrant", quadrant);
+  for (const key of LEAD_FILTER_KEYS) {
+    if (key === "quadrant") continue;      // handled above: "all" means none
+    const value = sp[key];
+    if (value) exportParams.set(key, value);
+  }
+  const exportHref = `/api/export?${exportParams.toString()}`;
+
   const link = (over: Record<string, string>) => {
     const p = new URLSearchParams();
     for (const [k, v] of Object.entries({ ...sp, ...over })) if (v) p.set(k, v);
@@ -50,8 +63,7 @@ export default async function LeadsPage({
             {data.total} lead{data.total === 1 ? "" : "s"}
           </span>
           <Button size="sm" variant="secondary"
-                  render={<a href={`/api/export?${new URLSearchParams(
-                    quadrant === "all" ? {} : { quadrant }).toString()}`} />}>
+                  render={<a href={exportHref} />}>
             Export CSV
           </Button>
         </div>
