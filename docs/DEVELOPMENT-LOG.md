@@ -35,7 +35,8 @@ Three phases, in order. Each one produced a document that the next one used.
 | Brainstorming | `docs/superpowers/specs/2026-08-27-lead-generation-system-design.md` — the design spec | Approved |
 | Planning | `docs/superpowers/plans/2026-08-29-lead-pipeline-core.md` — 17 numbered build tasks | Approved |
 | Building (Plan 1) | The pipeline in `backend/` — 17 tasks | Complete, reviewed, merged |
-| Building (Plan 2) | The API and scheduler — 11 tasks | Complete, reviewed |
+| Building (Plan 2) | The API and scheduler — 11 tasks | Complete, reviewed, merged |
+| Building (Plan 3) | The Next.js dashboard — 9 tasks | Complete, reviewed |
 | Building (Plan 3) | `docs/superpowers/plans/2026-09-01-dashboard.md` — the Next.js dashboard, 9 tasks | Complete, reviewed |
 
 Every design choice made along the way is written down in
@@ -192,7 +193,8 @@ No invented data — see section 6 for why that turned out to matter.
 
 ## 5. Build status
 
-All 17 tasks of Plan 1 and all 11 of Plan 2 are implemented and reviewed. Rather than repeat the task list, here is
+All 17 tasks of Plan 1, all 11 of Plan 2, and all 9 of Plan 3 are implemented
+and reviewed. Rather than repeat the task list, here is
 what each command does — that is what you actually need:
 
 | Command | What it does |
@@ -337,44 +339,88 @@ implementer or reviewer opening the actual source.
 
 **Read the interface. Do not recall it.**
 
+### What the dashboard's final review found
+
+Same shape a third time. Nine clean per-task reviews, then a broad pass found a
+critical defect none of them could see — and this one destroyed data.
+
+**The manual-facts form flattened "unknown" into "no".** Two of its fields are
+three-state in the database (`true`, `false`, or *not yet researched*), but the
+form rendered them as plain checkboxes, which have only two states. So every
+save wrote an explicit `false` for anything unticked. Typing only a note flipped
+both columns from "unknown" to "no" in `manual_facts` — the one table a pipeline
+rerun must never overwrite — and "unknown" became unreachable from the UI
+forever.
+
+That is the same unknown-is-not-no rule from section 3, broken a third time, in
+a third place: first in the extractor, then at the API's schema boundary, now in
+a form control. The fix was to replace each checkbox with a three-option
+control, because a checkbox cannot represent three states and no amount of form
+plumbing changes that.
+
+**Why the browser tests caught it and the unit tests did not.** The spec insisted
+Playwright run against a real seeded backend rather than mocked responses. That
+decision paid for itself twice over here: mocked responses would have happily
+echoed whatever the form sent.
+
+### The tests that could not catch their own bugs
+
+Three separate times on this branch, a test was written around the bug it was
+supposed to catch:
+
+- "Shows a dash instead of a phone number" only checked that one specific number
+  was absent — rendering a *different* fake number passed.
+- The mock for a page redirect did not throw the way the real one does, so the
+  regression it existed to guard could not fail it.
+- The fix for the CSV export filter mismatch introduced the same bug in the
+  opposite direction, and its own test was scoped around the gap.
+
+All three were caught the same way: by **mutating the code and checking the test
+fails**. None were caught by reading the test. That is now the standard for any
+test guarding a rule in this document — break the code first, watch it go red.
+
 ---
 
 ## 7. Open items
 
-**No known bugs.** Two criticals and six important findings from Plan 2's final
-review are all fixed and independently re-verified.
+**No known bugs.** One critical and five important findings from the dashboard's
+final review are fixed and independently re-verified against the running stack.
 
 **Decisions waiting on you**, not defects:
 
-- **`estimated_cost` reads about 4× low.** The preview prices the search API but not
-  the scraping, so a run estimated at $0.012 actually cost $0.050. Harmless today,
-  but it is now stored on the run and a dashboard would show it. Fixing it changes
-  the preview's response shape, so it is a decision rather than a patch.
-- **An API restart mid-run no longer self-heals.** `python -m cli reset-stuck-runs`
-  is the recovery, and nothing prompts you to run it. This is deliberate — see the
-  rule in section 6 — but the real fix is a heartbeat or owner column on `runs`,
-  which needs a migration and belongs to a later plan.
-- **CLI-created runs get no cost estimate**, only API-created ones. A visible
-  asymmetry if both appear in one list.
+- **`estimated_cost` reads about 4× low** — the preview prices the search step but
+  not the scraping. You decided to leave it, so the dashboard labels it
+  "Estimated search cost" and says scraping is extra. Read it that way; the real
+  figure is `actual_cost`, and `--max-cost` guards against real spend.
+- **An API restart mid-run does not self-heal.** `python -m cli reset-stuck-runs`
+  is the recovery. The proper fix is a heartbeat column, which needs a migration.
+- **Neither lead-detail form confirms a save.** The value persists, but nothing
+  says so — a `<Toaster />` is mounted and unused. The most-used screen in the
+  app, so worth doing before real daily use.
 
 **Deliberately deferred**, none with a failure scenario today:
 
-- `datetime.utcnow()` is deprecated in 3.12 and used across the whole schema. It is
-  internally consistent, so nothing breaks — but it should be the first commit after
-  this branch merges, done as one sweep.
-- `Stage.select` ignores `run_id`, and the per-segment scrape cap is cumulative, so
-  a **second vertical would count the first one's leftovers against its caps**. The
-  fix is a `Business.vertical` filter. Latent until vertical #2.
+- `datetime.utcnow()` is deprecated in 3.12 and used across the whole schema. Do
+  it as one sweep.
+- `Stage.select` ignores `run_id` and the per-segment scrape cap is cumulative, so
+  a **second vertical would count the first one's leftovers against its caps.**
+  The fix is a `Business.vertical` filter. Latent until vertical #2.
 - A retried scrape re-fetches pages that already succeeded, billing them twice.
-- The Dockerfile runs as root; the compose services have no restart policy.
-- Smaller: an auth-sweep test blind to routes hidden from the schema; a duplicated
-  business lookup; an observer crash labelled with the wrong stage name.
+- `safeNextPath` does not strip CR/LF, and a future-dated session token is
+  accepted. Both currently inert; both on the auth path.
+- `?page=abc` yields `page=NaN` on both list screens; `?page=99` renders
+  "Page 99 of 1"; the runs pagination drops other query parameters.
+- Outcome notes are write-only — saved, never displayed back.
+- The Dockerfiles run as root; the compose services have no restart policy.
 
-**Not built yet:** the Next.js dashboard. That is Plan 3, which has not been written.
+**Not built yet:** contact discovery and email outreach. The `contacts` table
+exists with no API and no UI (ADR-007, ADR-027) — that is the seam, and it is
+where the next plan starts. Also unbuilt: the ruleset-compare screen, which waits
+until a second ruleset exists, and any vertical beyond HVAC.
 
-**Machine note:** Homebrew's `postgresql@14` was stopped because it occupied port
-5432 and blocked the Docker database. Starting it again breaks this project until
-you stop it once more. Moving this project to 5433 would end that permanently.
+**Machine note:** Homebrew's `postgresql@14` is stopped because it collides with
+the Docker database on port 5432. Starting it breaks this project until you stop
+it again. Moving this project to 5433 would end that permanently.
 
 ---
 
