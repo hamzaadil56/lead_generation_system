@@ -1,6 +1,7 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { SESSION_COOKIE, signSession } from "@/lib/auth";
+import { MAX_SESSION_AGE_MS, SESSION_COOKIE, signSession } from "@/lib/auth";
+import { safeNextPath } from "@/lib/safe-redirect";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -8,16 +9,19 @@ import { Label } from "@/components/ui/label";
 export default async function Login({
   searchParams,
 }: { searchParams: Promise<{ next?: string; error?: string }> }) {
-  const { next = "/leads", error } = await searchParams;
+  const { next: rawNext, error } = await searchParams;
+  const next = safeNextPath(rawNext);
 
   async function submit(form: FormData) {
     "use server";
-    const target = String(form.get("next") || "/leads");
+    // Guard on both paths below: the error redirect embeds `target` too.
+    const target = safeNextPath(String(form.get("next") || ""));
     try {
       const token = await signSession(String(form.get("password") ?? ""));
       (await cookies()).set(SESSION_COOKIE, token, {
         httpOnly: true, sameSite: "lax", path: "/",
         secure: process.env.NODE_ENV === "production",
+        maxAge: MAX_SESSION_AGE_MS / 1000,
       });
     } catch {
       redirect(`/login?error=1&next=${encodeURIComponent(target)}`);

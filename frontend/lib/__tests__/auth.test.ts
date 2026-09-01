@@ -1,5 +1,5 @@
 import { beforeEach, expect, it } from "vitest";
-import { signSession, verifySession } from "@/lib/auth";
+import { MAX_SESSION_AGE_MS, signPayload, signSession, verifySession } from "@/lib/auth";
 
 beforeEach(() => {
   process.env.DASHBOARD_PASSWORD = "correct horse";
@@ -32,4 +32,21 @@ it("rejects a token signed with a different secret", async () => {
 it("refuses to operate when DASHBOARD_PASSWORD is unset", async () => {
   delete process.env.DASHBOARD_PASSWORD;
   await expect(signSession("anything")).rejects.toThrow(/DASHBOARD_PASSWORD/);
+});
+
+it("rejects a token older than the maximum session age", async () => {
+  const issuedAt = Date.now() - MAX_SESSION_AGE_MS - 1;
+  const stale = await signPayload(`ok.${issuedAt}`);
+  expect(await verifySession(stale)).toBe(false);
+});
+
+it("accepts a token just inside the maximum session age", async () => {
+  const issuedAt = Date.now() - MAX_SESSION_AGE_MS + 1000;
+  const fresh = await signPayload(`ok.${issuedAt}`);
+  expect(await verifySession(fresh)).toBe(true);
+});
+
+it("rejects a token with a non-numeric timestamp", async () => {
+  const garbage = await signPayload("ok.not-a-timestamp");
+  expect(await verifySession(garbage)).toBe(false);
 });
