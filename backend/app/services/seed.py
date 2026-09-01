@@ -15,6 +15,14 @@ from app.models.run import Run
 
 RULESET = "hvac_v1"
 _SEED_PREFIX = "seed-"
+_EXTRACTOR_VERSION = "seed"
+
+# Fixed instant everything else in the seed is offset from. Pinned as a
+# module constant (rather than computed inside `_insert`) because
+# `_seed_counts` also needs it, to identify the two seed `Run` rows by their
+# exact `(status, created_at)` -- `Run` carries no "seed-" marker the way
+# `Business.cid` does.
+_BASE = datetime(2026, 9, 1, 9, 0, 0)
 
 # Real cids are long numeric strings (e.g. "16433610908791049931"). These are
 # deliberately not: the "seed-" prefix is what `_already_seeded` matches on,
@@ -36,34 +44,57 @@ _LEADS = [
 
 _COMPLAINT = "Called three times and nobody ever answered the phone."
 
+# `(status, created_at)` for the two `Run` rows `_insert` writes. `Run` has
+# no "seed-" prefix to filter on the way `Business.cid` does, so identity is
+# this exact pair instead -- `created_at` is a fixed value nothing but this
+# module ever writes, so a collision with a real run is not a practical
+# concern.
+_RUN_MARKERS = [
+    ("complete", _BASE),
+    ("failed", _BASE + timedelta(hours=1)),
+]
+
 
 def _already_seeded(session: Session) -> bool:
     return session.query(Business).filter(
         Business.cid.like(f"{_SEED_PREFIX}%")).count() > 0
 
 
-def seed_demo(session: Session) -> dict[str, int]:
-    """Insert the fixed dataset. Returns row counts. Safe to call repeatedly."""
-    counts = {"businesses": len(_LEADS), "scores": len(_LEADS), "runs": 2}
-    if _already_seeded(session):
-        return counts
+def _seed_counts(session: Session) -> dict[str, int]:
+    """Live counts of the seed's rows, queried fresh every call.
 
-    base = datetime(2026, 9, 1, 9, 0, 0)
+    Never assumed: `seed_demo` used to return a hardcoded constant on the
+    idempotent path, which kept reporting the full dataset even after a
+    caller deleted one seeded row out from under it. These queries reflect
+    whatever is actually in the database right now.
+    """
+    businesses = session.query(Business).filter(
+        Business.cid.like(f"{_SEED_PREFIX}%")).count()
+    scores = (session.query(Score)
+              .join(Business, Score.business_id == Business.id)
+              .filter(Business.cid.like(f"{_SEED_PREFIX}%"))
+              .count())
+    runs = sum(
+        session.query(Run).filter_by(status=status, created_at=created_at).count()
+        for status, created_at in _RUN_MARKERS)
+    return {"businesses": businesses, "scores": scores, "runs": runs}
 
+
+def _insert(session: Session) -> None:
     complete = Run(status="complete", source="ui",
                    search_plan={"vertical": "hvac", "state": "tx",
                                 "location": None, "pages": 2},
                    stats={"discover": 10, "scrape": 10},
                    max_cost_usd=5.0, estimated_cost=0.012, actual_cost=0.05,
-                   created_at=base, started_at=base + timedelta(seconds=5),
-                   finished_at=base + timedelta(minutes=4))
+                   created_at=_BASE, started_at=_BASE + timedelta(seconds=5),
+                   finished_at=_BASE + timedelta(minutes=4))
     failed = Run(status="failed", source="ui",
                  search_plan={"vertical": "hvac", "location": "Dallas, TX",
                               "state": None, "pages": 5},
                  max_cost_usd=0.01, estimated_cost=0.03, actual_cost=0.012,
-                 created_at=base + timedelta(hours=1),
-                 started_at=base + timedelta(hours=1, seconds=5),
-                 finished_at=base + timedelta(hours=1, minutes=1),
+                 created_at=_BASE + timedelta(hours=1),
+                 started_at=_BASE + timedelta(hours=1, seconds=5),
+                 finished_at=_BASE + timedelta(hours=1, minutes=1),
                  error="budget: spent $0.01 of $0.01 ceiling")
     session.add_all([complete, failed])
     session.flush()
@@ -83,7 +114,7 @@ def seed_demo(session: Session) -> dict[str, int]:
             segment=segment_for(reviews),
             status=BusinessStatus.SCORED,
             first_seen_run_id=complete.id,
-            created_at=base, updated_at=base)
+            created_at=_BASE, updated_at=_BASE)
         session.add(business)
         session.flush()
 
@@ -101,7 +132,12 @@ def seed_demo(session: Session) -> dict[str, int]:
             software_from_html=None,
             runs_google_ads=(None if cid == "seed-07" else (i % 2 == 0)),
             missed_call_complaints_90d=(3 if pain > 60 else 0),
-            review_velocity_90d=5))
+            review_velocity_90d=5,
+            # Both carry ORM-side defaults (`datetime.utcnow` /
+            # "unknown") that vary between runs if left unset -- pinned
+            # explicitly so a wipe-and-reseed reproduces identical rows,
+            # not just identical row *counts*.
+            extracted_at=_BASE, extractor_version=_EXTRACTOR_VERSION))
 
         session.add(Score(
             business_id=business.id, ruleset_version=RULESET,
@@ -116,13 +152,32 @@ def seed_demo(session: Session) -> dict[str, int]:
                  "points": 30, "label": "Reviews mention missed calls",
                  "evidence": [_COMPLAINT] if pain > 60 else None},
             ],
-            scored_at=base + timedelta(minutes=3)))
+            scored_at=_BASE + timedelta(minutes=3)))
 
         if pain > 60:
             session.add(Review(
                 business_id=business.id, author="A. Customer", rating=1,
-                text=_COMPLAINT, published_at=base - timedelta(days=10),
+                text=_COMPLAINT, published_at=_BASE - timedelta(days=10),
                 source="serpapi"))
 
     session.commit()
-    return counts
+
+
+def seed_demo(session: Session) -> dict[str, int]:
+    """Insert the fixed dataset once; always return what is actually there.
+
+    Idempotence here is a coarse existence check -- `_already_seeded` asks
+    only whether any `seed-`-prefixed `Business` is present, then skips
+    the insert entirely. It does NOT verify the seed is intact: if a
+    caller (a test, typically) deletes a single seeded row -- one
+    business's `Score`, say -- a later call sees the surviving `seed-`
+    businesses, skips re-inserting anything, and that gap is not repaired.
+    What this function does not do is misreport it: the returned counts
+    are a live query of the seed's rows in the database, so a partial
+    seed shows up in the return value even though nothing here fixes it.
+    The remedy for a partial seed is to delete every `seed-`-prefixed row
+    (and the two seed `Run` rows) and call this again.
+    """
+    if not _already_seeded(session):
+        _insert(session)
+    return _seed_counts(session)
