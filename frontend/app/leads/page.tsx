@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { LeadsTable } from "@/components/leads-table";
+import { Pagination } from "@/components/pagination";
 import { Button } from "@/components/ui/button";
 import { apiGet, ApiError } from "@/lib/api";
 import { LEAD_FILTER_KEYS } from "@/lib/filters";
@@ -82,21 +83,9 @@ export default async function LeadsPage({
 
       <LeadsTable rows={data.items} />
 
-      <div className="flex items-center justify-between">
-        <span className="text-sm text-muted-foreground">
-          Page {data.page} of {data.pages}
-        </span>
-        <div className="flex gap-2">
-          <Button size="sm" variant="outline" disabled={data.page <= 1}
-                  render={data.page <= 1 ? undefined : <Link href={link({ page: String(data.page - 1) })} />}>
-            Previous
-          </Button>
-          <Button size="sm" variant="outline" disabled={!data.has_next}
-                  render={!data.has_next ? undefined : <Link href={link({ page: String(data.page + 1) })} />}>
-            Next
-          </Button>
-        </div>
-      </div>
+      <Pagination page={data.page} pages={data.pages}
+                  prevHref={data.page <= 1 ? null : link({ page: String(data.page - 1) })}
+                  nextHref={data.has_next ? link({ page: String(data.page + 1) }) : null} />
     </div>
   );
 }
