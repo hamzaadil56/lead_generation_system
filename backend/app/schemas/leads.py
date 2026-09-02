@@ -69,9 +69,28 @@ class EvidenceOut(BaseModel):
     published_at: datetime | None
 
 
+class ManualFactsOut(BaseModel):
+    """What a human has already typed for this lead.
+
+    Read-back for `PUT /leads/{cid}/manual-facts`. Without it the dashboard's
+    manual-facts form renders empty on every load, so a person cannot see what
+    they saved and a partial re-save silently nulls the other columns. The
+    fields mirror `ManualFactsIn` exactly -- same names, same table columns.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    estimated_employees: int | None
+    technician_count: int | None
+    has_office_admin: bool | None
+    owner_growth_focused: bool | None
+    notes: str | None
+
+
 class LeadDetailOut(BaseModel):
     lead: LeadOut
     score: ScoreOut | None
     reasons: list[ReasonOut]
     signals: dict[str, object]
     evidence: list[EvidenceOut]
+    # None means nobody has entered manual facts for this lead yet.
+    manual_facts: ManualFactsOut | None = None

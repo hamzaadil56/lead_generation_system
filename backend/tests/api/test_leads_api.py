@@ -5,6 +5,7 @@ import pytest
 from app.domain.rules.models import RuleReason
 from app.models.business import Business, BusinessStatus
 from app.models.derived import Score
+from app.models.manual import Outcome
 
 # The shape `ScoreStage` really persists: `asdict(RuleReason)`. The fixture
 # used to seed `reasons=[]`, so the reason mapping in `get_lead_detail`
@@ -37,6 +38,17 @@ def leads(session):
         session.add(Score(business_id=b.id, ruleset_version="hvac_v1",
                           fit_score=fit, pain_score=pain, quadrant=quad,
                           coverage=0.8, reasons=REASONS))
+    session.commit()
+
+
+@pytest.fixture
+def outcomes(session, leads):
+    """One recorded outcome, so `outcome_status` is a filter with something to
+    match. Adds no Business and no Score, so every existing count holds."""
+    business_id = (session.query(Business)
+                   .filter_by(cid="c1").one().id)
+    session.add(Outcome(business_id=business_id, status="contacted",
+                        source="manual"))
     session.commit()
 
 
@@ -151,3 +163,40 @@ def test_a_broken_reason_row_is_a_500_not_a_400(crashing_client, session):
 
     assert r.status_code == 500
     assert "leak-me" not in r.text
+
+
+# Every filter GET /leads accepts. The export endpoint used to take three of
+# them (quadrant, min_fit, ruleset_version) and FastAPI silently drops the
+# rest, so the screen said "1 lead" and the downloaded file held all of them.
+# Spec section 9 screen 3 and user story 13 both say "CSV export of the
+# FILTERED set".
+EXPORT_FILTERS = [
+    "quadrant=go_now",
+    "state=CA",
+    "state=TX",
+    "outcome_status=contacted",
+    "min_pain=50",
+    "min_fit=50",
+    "vertical=hvac",
+    "state=TX&min_pain=50&quadrant=go_now",
+]
+
+
+@pytest.mark.parametrize("query", EXPORT_FILTERS)
+def test_export_returns_the_same_rows_the_filtered_list_shows(client, outcomes,
+                                                              query):
+    listed = client.get(f"/leads?{query}").json()
+    exported = client.get(f"/leads/export.csv?{query}")
+
+    assert exported.status_code == 200
+    rows = exported.text.strip().splitlines()[1:]        # drop the header
+    assert len(rows) == listed["total"], (
+        f"{query}: screen shows {listed['total']}, file holds {len(rows)}")
+    assert [r["name"] for r in listed["items"]] == [r.split(",")[0] for r in rows]
+
+
+def test_export_of_an_unmatched_outcome_is_header_only(client, outcomes):
+    """The reproduction from the review, inverted: filtering to an outcome
+    nothing carries must export nothing, not everything."""
+    r = client.get("/leads/export.csv?outcome_status=won")
+    assert len(r.text.strip().splitlines()) == 1
