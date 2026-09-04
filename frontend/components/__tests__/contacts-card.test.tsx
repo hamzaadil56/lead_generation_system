@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { ContactsCard, type ContactsCardActions } from "@/components/contacts-card";
 import type { ContactOut } from "@/lib/types";
@@ -134,6 +134,29 @@ it("submits the add form with the typed values, and clears the field with no val
   });
 });
 
+it("keeps what the user typed when add rejects", async () => {
+  // The server rejects this routinely: 422 with neither name nor email (or
+  // a malformed linkedin_url), and 409 when the address is already a
+  // contact on this lead — an ordinary outcome once harvest has run, not an
+  // edge case. Resetting the form regardless of outcome would silently
+  // discard the user's typing on every one of those paths.
+  const actions = makeActions();
+  vi.mocked(actions.add).mockRejectedValue(new Error("409 Conflict"));
+  render(<ContactsCard contacts={[]} actions={actions} website={null} />);
+  const nameInput = screen.getByLabelText(/^name$/i) as HTMLInputElement;
+  const emailInput = screen.getByLabelText(/^email$/i) as HTMLInputElement;
+  fireEvent.change(nameInput, { target: { value: "Jane Doe" } });
+  fireEvent.change(emailInput, { target: { value: "jane@leisuration.test" } });
+  fireEvent.click(screen.getByRole("button", { name: /^add$/i }));
+  await waitFor(() => expect(actions.add).toHaveBeenCalled());
+  // Flush the rejected promise's microtask queue. There is nothing else to
+  // await on: a reset that never happens produces no observable event, so
+  // the assertion below is the only proof available.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(nameInput.value).toBe("Jane Doe");
+  expect(emailInput.value).toBe("jane@leisuration.test");
+});
+
 it("renders a mailto link for the contact's email", () => {
   render(<ContactsCard contacts={[typed]} actions={makeActions()} website={null} />);
   expect(screen.getByRole("link", { name: typed.email! }))
@@ -142,5 +165,16 @@ it("renders a mailto link for the contact's email", () => {
 
 it("uses the email as the row's name when no name was given", () => {
   render(<ContactsCard contacts={[harvested]} actions={makeActions()} website={null} />);
-  expect(screen.getAllByText(harvested.email!).length).toBeGreaterThan(0);
+  // The row's name element is a <span>; the row also independently renders
+  // the same email as a <a href="mailto:..."> link further down. Scoping to
+  // "span" targets only the name fallback — an assertion against the email
+  // text anywhere in the row would pass on the mailto link alone even if
+  // the name-fallback logic were deleted entirely.
+  expect(screen.getByText(harvested.email!, { selector: "span" })).toBeInTheDocument();
+});
+
+it("still shows the typed name, not the email, when a name is given", () => {
+  render(<ContactsCard contacts={[typed]} actions={makeActions()} website={null} />);
+  expect(screen.getByText(typed.name!, { selector: "span" })).toBeInTheDocument();
+  expect(screen.queryByText(typed.email!, { selector: "span" })).not.toBeInTheDocument();
 });

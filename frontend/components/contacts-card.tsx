@@ -92,15 +92,27 @@ export function ContactsCard({ contacts, actions, website }: {
       const v = String(data.get(key) ?? "").trim();
       return v === "" ? null : v;
     };
-    void actions.add({
+    // Only clear the form once the add actually succeeds. The server
+    // routinely rejects this: 422 when neither name nor email is given (or
+    // linkedin_url is malformed), and 409 when the address is already a
+    // contact on this lead — expected whenever harvest already found it.
+    // Resetting unconditionally would silently discard what the user typed
+    // on every one of those ordinary failures.
+    Promise.resolve(actions.add({
       name: str("name"),
       role: str("role"),
       email: str("email"),
       phone: str("phone"),
       linkedin_url: str("linkedin_url"),
       is_primary: Boolean(data.get("is_primary")),
-    });
-    formRef.current?.reset();
+    })).then(() => formRef.current?.reset())
+      .catch(() => {
+        // Swallowed deliberately: surfacing the failure (a toast on 409
+        // duplicate, an inline message on 422 validation) is the caller's
+        // job — `actions.add` is a prop Task 9 owns. This catch exists only
+        // so a rejected add doesn't surface as an unhandled promise
+        // rejection in the console; it must never reset the form.
+      });
   }
 
   return (
