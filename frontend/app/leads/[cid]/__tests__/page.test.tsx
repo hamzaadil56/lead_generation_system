@@ -28,6 +28,7 @@ const detail = (facts: ManualFactsOut | null): LeadDetailOut => ({
     outcome_status: null,
   },
   score: null, reasons: [], signals: {}, evidence: [], manual_facts: facts,
+  contacts: [],
 });
 
 const NOTHING_RESEARCHED: ManualFactsOut = {

@@ -42,6 +42,38 @@ export type ManualFactsOut = {
   notes: string | null;
 };
 
+/** One contact. `verification_status` is deliberately not exposed — it answers
+ *  "is this deliverable?", which nothing in v1 knows. Do not conflate it with
+ *  `confirmed_at`, which answers "did a human vouch for this?" (ADR-029). */
+export type ContactOut = {
+  id: number;
+  name: string | null;
+  role: string | null;               // designation, free text
+  email: string | null;
+  phone: string | null;
+  linkedin_url: string | null;
+  source: string;                    // "manual" | "website"
+  confidence: number | null;         // null for a human-typed contact
+  discovery_note: string | null;     // why the harvester scored it that way
+  is_primary: boolean;
+  confirmed_at: string | null;       // null = EXCLUDED from the export
+  created_at: string | null;
+};
+
+export type ContactIn = {
+  name?: string | null;              // max 200
+  role?: string | null;              // max 100
+  email?: string | null;             // max 254, validated server-side
+  phone?: string | null;             // max 50, NOT validated (ADR-013 is for
+                                     // Serper's business phone, not this)
+  linkedin_url?: string | null;      // max 500, must start http(s)://
+  is_primary?: boolean;
+};
+// At least one of `name` or `email` is required, enforced server-side (422).
+
+export type HarvestOut = { created: number; skipped: number; candidates: number };
+export type BulkHarvestOut = { created: number; businesses: number };
+
 export type LeadDetailOut = {
   lead: LeadOut;
   score: ScoreOut | null;        // null = not scored yet. BRANCH ON THIS,
@@ -51,6 +83,7 @@ export type LeadDetailOut = {
   signals: Record<string, unknown>;   // null value = UNKNOWN, not false
   evidence: EvidenceOut[];
   manual_facts: ManualFactsOut | null;   // null = nothing entered yet
+  contacts: ContactOut[];            // primary first, then confirmed
 };
 
 export type RunOut = {
