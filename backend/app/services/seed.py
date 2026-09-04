@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.domain.segments import segment_for
 from app.models.business import Business, BusinessStatus
-from app.models.derived import Review, Score, Signals
+from app.models.derived import RawPayload, Review, Score, Signals
+from app.models.manual import Contact
 from app.models.run import Run
 
 RULESET = "hvac_v1"
@@ -77,7 +78,12 @@ def _seed_counts(session: Session) -> dict[str, int]:
     runs = sum(
         session.query(Run).filter_by(status=status, created_at=created_at).count()
         for status, created_at in _RUN_MARKERS)
-    return {"businesses": businesses, "scores": scores, "runs": runs}
+    contacts = (session.query(Contact)
+                .join(Business, Contact.business_id == Business.id)
+                .filter(Business.cid.like(f"{_SEED_PREFIX}%"))
+                .count())
+    return {"businesses": businesses, "scores": scores, "runs": runs,
+            "contacts": contacts}
 
 
 def _insert(session: Session) -> None:
@@ -104,7 +110,11 @@ def _insert(session: Session) -> None:
             cid=cid, name=name, city=city, state=state,
             address=f"{100 + i} Main St, {city}, {state}",
             phone="+17135550100", phone_is_valid=valid,
-            website=f"https://{cid}.example.com",
+            # `.test` (RFC 6761), not `.example.com`: `example.com` is on the
+            # harvester's vendor-domain denylist, so seeded addresses would be
+            # rejected and the harvest end-to-end test would pass against a
+            # broken harvester.
+            website=f"https://{cid}.test",
             rating=4.7, review_count=reviews, vertical="hvac",
             # Derived by the real classifier -- verified signature:
             #   segment_for(rating_count: int | None) -> Segment | None
@@ -153,6 +163,25 @@ def _insert(session: Session) -> None:
                  "evidence": [_COMPLAINT] if pain > 60 else None},
             ],
             scored_at=_BASE + timedelta(minutes=3)))
+
+        if cid == "seed-01":
+            # A RawPayload the harvester can actually find addresses in, so
+            # the end-to-end harvest test exercises the real extractor rather
+            # than a mock.
+            session.add(RawPayload(
+                business_id=business.id, source="firecrawl",
+                url=f"https://{cid}.test/contact", fetched_at=_BASE,
+                payload={},
+                raw_text=('<html><body>'
+                          f'<a href="mailto:owner@{cid}.test">Email the owner</a>'
+                          '<p>noreply@' + cid + '.test</p>'
+                          '</body></html>')))
+
+        if cid == "seed-02":
+            session.add(Contact(
+                business_id=business.id, name="Dana Reyes", role="Owner",
+                email="dana@seed-02.test", source="manual", confidence=None,
+                is_primary=True, confirmed_at=_BASE, created_at=_BASE))
 
         if pain > 60:
             session.add(Review(
