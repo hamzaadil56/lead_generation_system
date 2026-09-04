@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import type { LeadDetailOut, ManualFactsOut } from "@/lib/types";
+import type { ContactOut, LeadDetailOut, ManualFactsOut } from "@/lib/types";
 
 vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 vi.mock("next/navigation", () => ({ notFound: vi.fn() }));
 
 const apiGetMock = vi.fn();
 const apiSendMock = vi.fn();
+const apiDeleteMock = vi.fn();
 class MockApiError extends Error {
   constructor(public status: number, public detail: string) {
     super(detail);
@@ -15,12 +16,13 @@ class MockApiError extends Error {
   }
 }
 vi.mock("@/lib/api", () => ({
-  apiGet: apiGetMock, apiSend: apiSendMock, ApiError: MockApiError,
+  apiGet: apiGetMock, apiSend: apiSendMock, apiDelete: apiDeleteMock,
+  ApiError: MockApiError,
 }));
 
 const { default: LeadDetail } = await import("@/app/leads/[cid]/page");
 
-const detail = (facts: ManualFactsOut | null): LeadDetailOut => ({
+const detail = (facts: ManualFactsOut | null, contacts: ContactOut[] = []): LeadDetailOut => ({
   lead: {
     cid: "seed-01", name: "Uptown Air", city: "Houston", state: "TX",
     website: null, phone: null, segment: null, review_count: null,
@@ -28,16 +30,23 @@ const detail = (facts: ManualFactsOut | null): LeadDetailOut => ({
     outcome_status: null,
   },
   score: null, reasons: [], signals: {}, evidence: [], manual_facts: facts,
-  contacts: [],
+  contacts,
 });
+
+const harvestedContact: ContactOut = {
+  id: 1, name: null, role: null, email: "owner@uptownair.test",
+  phone: null, linkedin_url: null, source: "website", confidence: 0.9,
+  discovery_note: "matches the website domain", is_primary: false,
+  confirmed_at: null, created_at: "2026-09-01T09:00:00",
+};
 
 const NOTHING_RESEARCHED: ManualFactsOut = {
   estimated_employees: null, technician_count: null,
   has_office_admin: null, owner_growth_focused: null, notes: null,
 };
 
-async function renderPage(facts: ManualFactsOut | null) {
-  apiGetMock.mockResolvedValueOnce(detail(facts));
+async function renderPage(facts: ManualFactsOut | null, contacts: ContactOut[] = []) {
+  apiGetMock.mockResolvedValueOnce(detail(facts, contacts));
   apiSendMock.mockResolvedValue({ cid: "seed-01" });
   render(await LeadDetail({ params: Promise.resolve({ cid: "seed-01" }) }));
 }
@@ -56,7 +65,9 @@ async function saveFacts(): Promise<Record<string, unknown>> {
   return call?.[2] as Record<string, unknown>;
 }
 
-afterEach(() => { apiGetMock.mockReset(); apiSendMock.mockReset(); });
+afterEach(() => {
+  apiGetMock.mockReset(); apiSendMock.mockReset(); apiDeleteMock.mockReset();
+});
 
 it("prefills an unresearched boolean fact as unknown, not as no", async () => {
   await renderPage(NOTHING_RESEARCHED);
@@ -107,4 +118,72 @@ it("a partial save does not disturb the fields it did not touch", async () => {
     estimated_employees: 13, technician_count: 4,
     has_office_admin: true, owner_growth_focused: false, notes: "prior note",
   });
+});
+
+it("renders the contacts card with the lead's contacts", async () => {
+  await renderPage(NOTHING_RESEARCHED, [harvestedContact]);
+  expect(screen.getByText("Contacts")).toBeInTheDocument();
+  expect(screen.getByText(harvestedContact.email!, { selector: "span" }))
+    .toBeInTheDocument();
+});
+
+/** Fill in and submit the Contacts card's "add" form. */
+function submitAddContact(name: string, email: string) {
+  fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: name } });
+  fireEvent.change(screen.getByLabelText(/^email$/i), { target: { value: email } });
+  fireEvent.click(screen.getByRole("button", { name: /^add$/i }));
+}
+
+it("posts a new contact to the lead's contacts endpoint", async () => {
+  await renderPage(NOTHING_RESEARCHED, []);
+  submitAddContact("Jane Doe", "jane@uptownair.test");
+  await waitFor(() => expect(apiSendMock).toHaveBeenCalledWith(
+    "POST", "/leads/seed-01/contacts", expect.objectContaining({
+      name: "Jane Doe", email: "jane@uptownair.test",
+    })));
+});
+
+it("surfaces a 409 from adding a duplicate contact as an inline message, not a crash", async () => {
+  // A duplicate address is routine once harvest has already found it -- the
+  // add form's own .catch(() => {}) swallows the rejection so the user's
+  // typing survives, which means the message has to come from somewhere
+  // else: the server action must show it before that catch runs.
+  await renderPage(NOTHING_RESEARCHED, []);
+  apiSendMock.mockImplementation((_method: string, path: string) => {
+    if (String(path).includes("/contacts")) {
+      return Promise.reject(new MockApiError(409, "that email is already a contact for this lead"));
+    }
+    return Promise.resolve({});
+  });
+  submitAddContact("Jane Doe", "jane@uptownair.test");
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "that email is already a contact for this lead");
+  // Nothing above this should have thrown out to an error boundary -- the
+  // form and its fields are still on the page, still holding what was typed.
+  expect(screen.getByLabelText(/^name$/i)).toHaveValue("Jane Doe");
+});
+
+it("confirms a contact through the contacts endpoint", async () => {
+  await renderPage(NOTHING_RESEARCHED, [harvestedContact]);
+  fireEvent.click(screen.getByRole("button", { name: /^confirm$/i }));
+  await waitFor(() => expect(apiSendMock).toHaveBeenCalledWith(
+    "POST", "/contacts/1/confirm", undefined));
+});
+
+it("deletes a contact through apiDelete", async () => {
+  apiDeleteMock.mockResolvedValue(undefined);
+  await renderPage(NOTHING_RESEARCHED, [harvestedContact]);
+  fireEvent.click(screen.getByRole("button", { name: /delete/i }));
+  await waitFor(() => expect(apiDeleteMock).toHaveBeenCalledWith("/contacts/1"));
+});
+
+it("harvests contacts for this lead from its website", async () => {
+  const detailWithWebsite = detail(NOTHING_RESEARCHED, []);
+  detailWithWebsite.lead.website = "https://uptownair.test";
+  apiGetMock.mockResolvedValueOnce(detailWithWebsite);
+  apiSendMock.mockResolvedValue({ created: 1, skipped: 0, candidates: 1 });
+  render(await LeadDetail({ params: Promise.resolve({ cid: "seed-01" }) }));
+  fireEvent.click(screen.getByRole("button", { name: /harvest/i }));
+  await waitFor(() => expect(apiSendMock).toHaveBeenCalledWith(
+    "POST", "/leads/seed-01/contacts/harvest", undefined));
 });

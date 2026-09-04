@@ -68,8 +68,15 @@ export async function apiGet<T>(
 }
 
 export async function apiSend<T>(method: "POST" | "PUT", path: string,
-                                 body: unknown): Promise<T> {
-  return (await request(method, path, undefined, body)).json() as Promise<T>;
+                                 body: unknown,
+                                 params?: Record<string, string | number | undefined>): Promise<T> {
+  return (await request(method, path, params, body)).json() as Promise<T>;
+}
+
+/** DELETE never carries a request body, and a 204 response never carries a
+ *  response body either -- calling .json() on it would throw. */
+export async function apiDelete(path: string): Promise<void> {
+  await request("DELETE", path);
 }
 
 /** For the CSV proxy, which needs the Response itself rather than JSON. */

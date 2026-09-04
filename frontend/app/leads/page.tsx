@@ -1,10 +1,12 @@
+import { revalidatePath } from "next/cache";
 import Link from "next/link";
+import { HarvestContactsButton, type HarvestResult } from "@/components/harvest-contacts-button";
 import { LeadsTable } from "@/components/leads-table";
 import { Pagination } from "@/components/pagination";
 import { Button } from "@/components/ui/button";
-import { apiGet, ApiError } from "@/lib/api";
+import { apiGet, apiSend, ApiError } from "@/lib/api";
 import { LEAD_FILTER_KEYS } from "@/lib/filters";
-import type { LeadOut, Page } from "@/lib/types";
+import type { BulkHarvestOut, LeadOut, Page } from "@/lib/types";
 
 const QUADRANTS = ["go_now", "nurture", "low_fit", "cold"];
 const OUTCOMES = ["new", "contacted", "replied", "booked", "won", "lost"];
@@ -48,6 +50,25 @@ export default async function LeadsPage({
     if (value) exportParams.set(key, value);
   }
   const exportHref = `/api/export?${exportParams.toString()}`;
+  // Same exportParams, same one filter object underneath -- a second,
+  // independently-built query string here is exactly how this drifted twice
+  // already (see the comment on `filters` above).
+  const contactsExportHref = `/api/contacts-export?${exportParams.toString()}`;
+
+  async function harvestContacts(): Promise<HarvestResult> {
+    "use server";
+    try {
+      const result = await apiSend<BulkHarvestOut>(
+        "POST", "/contacts/harvest", undefined, filters);
+      revalidatePath("/leads");
+      return { created: result.created, error: null };
+    } catch (e) {
+      return {
+        created: null,
+        error: e instanceof ApiError ? e.detail : "Could not harvest contacts.",
+      };
+    }
+  }
 
   const link = (over: Record<string, string>) => {
     const p = new URLSearchParams();
@@ -74,6 +95,11 @@ export default async function LeadsPage({
                   render={<a href={exportHref} />}>
             Export CSV
           </Button>
+          <Button size="sm" variant="secondary"
+                  render={<a href={contactsExportHref} />}>
+            Export contacts CSV
+          </Button>
+          <HarvestContactsButton action={harvestContacts} />
         </div>
       </div>
 

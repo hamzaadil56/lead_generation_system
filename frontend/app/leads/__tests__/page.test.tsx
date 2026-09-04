@@ -98,3 +98,25 @@ it("does not leak paging into the export", async () => {
   expect(params.has("page")).toBe(false);
   expect(params.has("page_size")).toBe(false);
 });
+
+it("derives the contacts export link from the same filters as the leads export", async () => {
+  // Two independently-built query strings is exactly how the export drifted
+  // from the list twice already (f7b1ef2, and its inverted repeat). The
+  // contacts export link must never be a second hand-rolled copy.
+  apiGetMock.mockResolvedValueOnce(envelope);
+  render(await LeadsPage({ searchParams: Promise.resolve({
+    quadrant: "go_now", vertical: "hvac", state: "TX",
+    outcome_status: "contacted", min_fit: "40", min_pain: "30",
+  }) }));
+  const leadsHref = screen.getByRole("link", { name: "Export CSV" }).getAttribute("href")!;
+  const contactsHref = screen.getByRole("link", { name: "Export contacts CSV" }).getAttribute("href")!;
+  const leadsQuery = new URL(leadsHref, "http://x").searchParams;
+  const contactsQuery = new URL(contactsHref, "http://x").searchParams;
+  expect(Object.fromEntries(contactsQuery)).toEqual(Object.fromEntries(leadsQuery));
+});
+
+it("offers a harvest-emails button", async () => {
+  apiGetMock.mockResolvedValueOnce(envelope);
+  render(await LeadsPage({ searchParams: Promise.resolve({}) }));
+  expect(screen.getByRole("button", { name: /harvest emails/i })).toBeInTheDocument();
+});
