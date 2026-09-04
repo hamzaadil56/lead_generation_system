@@ -45,6 +45,12 @@ class Contact(Base):               # PERMANENT — manual in v1, resolvers in v2
     linkedin_url: Mapped[str | None] = mapped_column(String)
     source: Mapped[str] = mapped_column(String)  # manual | license_registry | website | ...
     confidence: Mapped[float | None] = mapped_column(Float)
+    # Answers "is this address deliverable?" (ADR-029). Nothing in v1 ever
+    # writes this column -- deliverability checking does not exist yet -- so
+    # it stays NULL for every row, manual or harvested. Do NOT conflate it
+    # with `confirmed_at` below: that column answers "did a human decide
+    # this is a person worth emailing, and when?", a judgement a human makes
+    # regardless of whether the address bounces.
     verification_status: Mapped[str | None] = mapped_column(String)  # unverified|valid|risky|invalid|catch_all
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
     # default=utcnow: the column existed from the initial migration but
