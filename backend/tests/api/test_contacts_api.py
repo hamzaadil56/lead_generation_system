@@ -242,3 +242,36 @@ def test_bulk_harvest_declares_every_lead_filter(param):
     checks the signature itself rather than a behaviour."""
     from app.api.routers.contacts import harvest_many
     assert param in inspect.signature(harvest_many).parameters
+
+
+@pytest.mark.parametrize("param", [
+    "quadrant", "vertical", "state", "outcome_status",
+    "min_fit", "min_pain", "ruleset_version",
+])
+def test_export_declares_every_lead_filter(param):
+    """Same failure mode as the leads export (commit f7b1ef2): a filter
+    missing from the signature is silently dropped by FastAPI, so the export
+    would emit the whole table under a URL that says otherwise."""
+    from app.api.routers.contacts import export_contacts_csv
+    assert param in inspect.signature(export_contacts_csv).parameters
+
+
+def test_export_csv_emits_only_confirmed_contacts(client, session):
+    business = session.query(Business).filter_by(cid="c-1").one()
+    session.add(Score(business_id=business.id, ruleset_version="hvac_v1",
+                      fit_score=80, pain_score=70, quadrant="go_now",
+                      coverage=0.8, reasons=[]))
+    session.add_all([
+        Contact(business_id=business.id, email="good@acme.test",
+                name="John", source="manual",
+                confirmed_at=datetime(2026, 9, 1)),
+        Contact(business_id=business.id, email="unconfirmed@acme.test",
+                source="website", confidence=0.9, confirmed_at=None),
+    ])
+    session.commit()
+
+    r = client.get("/contacts/export.csv")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/csv")
+    assert "good@acme.test" in r.text
+    assert "unconfirmed@acme.test" not in r.text

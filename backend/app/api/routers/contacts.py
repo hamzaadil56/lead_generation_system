@@ -1,3 +1,6 @@
+import tempfile
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 
@@ -7,6 +10,7 @@ from app.models.manual import Contact
 from app.repositories.leads import DEFAULT_RULESET, LeadFilters
 from app.schemas.contacts import (BulkHarvestOut, ContactIn, ContactOut,
                                   ContactUpdate, HarvestOut)
+from app.services.contact_export import export_contacts
 from app.services.contact_harvest import (harvest_for_business,
                                           harvest_for_filters)
 from app.services.contacts import (ContactWouldBeEmptyError,
@@ -30,6 +34,38 @@ def _contact_or_404(db: Session, contact_id: int) -> Contact:
         raise HTTPException(status_code=404,
                             detail=f"no such contact: {contact_id}")
     return row
+
+
+@router.get("/contacts/export.csv")
+def export_contacts_csv(quadrant: str | None = None,
+                        vertical: str | None = None,
+                        state: str | None = None,
+                        min_fit: int = Query(0, ge=0, le=100),
+                        min_pain: int = Query(0, ge=0, le=100),
+                        outcome_status: str | None = None,
+                        ruleset_version: str = DEFAULT_RULESET,
+                        db: Session = Depends(get_db)) -> Response:
+    """Takes EVERY filter `GET /leads` takes, and validates them identically.
+
+    FastAPI silently ignores query params an endpoint does not declare, so a
+    filter missing here does not fail: it exports the whole contacts table
+    under a URL that says otherwise. That is exactly how the leads export
+    shipped honouring one filter of five (commit f7b1ef2).
+
+    Declared above the `/contacts/{contact_id}` routes so `export.csv` can
+    never be matched as a `{contact_id}` path parameter.
+    """
+    filters = LeadFilters(quadrant=quadrant, vertical=vertical, state=state,
+                          min_fit=min_fit, min_pain=min_pain,
+                          outcome_status=outcome_status,
+                          ruleset_version=ruleset_version)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "contacts.csv"
+        export_contacts(db, filters, path)
+        content = path.read_text(encoding="utf-8")
+    return Response(
+        content=content, media_type="text/csv",
+        headers={"content-disposition": 'attachment; filename="contacts.csv"'})
 
 
 @router.post("/leads/{cid}/contacts", response_model=ContactOut,
