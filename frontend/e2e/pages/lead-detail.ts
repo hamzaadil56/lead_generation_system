@@ -48,4 +48,48 @@ export class LeadDetailPage {
     await this.factsNotes().fill(text);
     await this.save("Save facts");
   }
+
+  /** The `<li>` for one contact row, scoped by any visible text in it (name,
+   *  email, or discovery note). Confirm/Delete live inside this row, and
+   *  several rows can be on screen at once, so every contact action below
+   *  is scoped through this rather than a bare `getByRole`. */
+  contactRow(match: string): Locator {
+    return this.page.locator("li").filter({ hasText: match });
+  }
+
+  /** Same wait strategy as `save` above: ContactsCard's actions are plain
+   *  server-action calls with no success indicator of their own, so the
+   *  response to the action's own POST is the only deterministic signal
+   *  that the mutation (and the `revalidatePath` after it) has landed. */
+  private async mutate(click: () => Promise<void>) {
+    await Promise.all([
+      this.page.waitForResponse((r) =>
+        r.request().method() === "POST" && r.url().includes("/leads/")),
+      click(),
+    ]);
+  }
+
+  async harvestContacts() {
+    await this.mutate(() =>
+      this.page.getByRole("button", { name: "Harvest from website" }).click());
+  }
+
+  async confirmContact(match: string) {
+    await this.mutate(() =>
+      this.contactRow(match).getByRole("button", { name: "Confirm" }).click());
+  }
+
+  async deleteContact(match: string) {
+    await this.mutate(() =>
+      this.contactRow(match).getByRole("button", { name: "Delete" }).click());
+  }
+
+  /** Fills only the fields given, then submits. Mirrors ContactsCard's own
+   *  "" -> null coercion: an omitted field is left blank, not zeroed out. */
+  async addContact(fields: { name?: string; email?: string }) {
+    if (fields.name) await this.page.getByLabel("Name").fill(fields.name);
+    if (fields.email) await this.page.getByLabel("Email").fill(fields.email);
+    await this.mutate(() =>
+      this.page.getByRole("button", { name: "Add" }).click());
+  }
 }

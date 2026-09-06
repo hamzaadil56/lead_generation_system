@@ -1,11 +1,11 @@
 # Development Log — Lead Pipeline Core
 
-**Last updated:** 2026-09-01
-**Branch:** `feat/dashboard` (not yet merged)
-**Status:** backend pipeline, HTTP API, scheduler, and the Next.js dashboard all
-complete and reviewed — 320 backend tests, 60 frontend tests, and an 18-case
-Playwright suite against the live stack all pass; `mypy` and `tsc` clean. Not
-yet run against live provider APIs.
+**Last updated:** 2026-09-05
+**Branch:** `feat/contacts` (not yet merged)
+**Status:** backend pipeline, HTTP API, scheduler, the Next.js dashboard, and
+contact discovery all complete and reviewed — 481 backend tests, 132 frontend
+tests, and a 31-case Playwright suite against the live stack all pass; `mypy`
+and `tsc` clean. Not yet run against live provider APIs.
 
 This document explains, in plain language, what exists in this repository and why.
 If you are picking the project back up after time away, read this first.
@@ -38,9 +38,10 @@ Three phases, in order. Each one produced a document that the next one used.
 | Building (Plan 2) | The API and scheduler — 11 tasks | Complete, reviewed, merged |
 | Building (Plan 3) | The Next.js dashboard — 9 tasks | Complete, reviewed |
 | Building (Plan 3) | `docs/superpowers/plans/2026-09-01-dashboard.md` — the Next.js dashboard, 9 tasks | Complete, reviewed |
+| Building (Plan 4) | `docs/superpowers/specs/2026-09-04-contacts-design.md` and `docs/superpowers/plans/2026-09-04-contacts.md` — contact discovery, 11 tasks | Complete, reviewed |
 
 Every design choice made along the way is written down in
-`docs/decisions/DECISIONS.md` — 27 numbered decisions, each in the form
+`docs/decisions/DECISIONS.md` — 29 numbered decisions, each in the form
 *Context → Decision → Why → Consequences*. When you wonder "why is it done this
 way", that file is the answer, not this one.
 
@@ -49,7 +50,9 @@ tests and committed it, then a second agent reviewed the diff against the plan, 
 defects went back for a fix round with a scoped re-review. That is why the git
 history reads as one clean commit per feature, with `fix:` commits where a review
 found something. A final review then read the whole branch at once — see section 6,
-because it is the part worth reading.
+because it is the part worth reading. Contacts (Plan 4) skipped that last big-bang
+pass in favour of a running ledger, checked before every task was dispatched and
+updated after every review — section 6 explains what that caught instead.
 
 ---
 
@@ -132,6 +135,76 @@ separate `coverage` number records how much we actually knew.
 Without this, a business we know nothing about would score identically to a
 business we know is a bad fit, and you would waste emails on it.
 
+### Contacts: manual entry plus a free harvest
+
+Scoring tells you *which* businesses to email. It does not tell you *who* to
+email. The `contacts` table has existed since day one (ADR-007) but had no
+form and no endpoint until now — v1 shipped without it on purpose, and ADR-027
+recorded that as a deliberate gap, not an oversight.
+
+There are two ways a contact gets into the table, and they behave differently:
+
+- **Type one in.** A box on the lead detail page takes a name, role, email,
+  phone, and LinkedIn URL. Since a person just typed it, it counts as
+  confirmed the moment it is saved.
+- **Harvest one.** A button on the same page (and a CLI command,
+  `harvest-contacts`, for doing it across a whole filtered batch of leads at
+  once) re-reads the HTML already sitting in `raw_payloads` from that
+  business's original scrape and looks for email addresses in it.
+
+**Harvest costs nothing** because it never talks to the internet. It is not a
+new pipeline stage and does not touch `Business.status` — it is a plain
+service function the API and the CLI both call, reading data that was already
+paid for and stored forever back in stage 2 (ADR-003). That is the two-halves
+design from earlier in this section paying off in a way it was not originally
+built for: a feature added weeks later, working retroactively on businesses
+scraped long before it existed, at zero marginal cost. Harvesting never
+overwrites or deletes a row, only inserts new ones — a rerun on the same
+business finds the same addresses and skips them.
+
+Every harvested address gets a confidence score from 0.9 down to 0.3, based on
+how closely its domain resembles the business's own website and name — an
+address at the business's own domain scores highest, a free provider like
+Gmail scores in the middle (most owner-run HVAC businesses actually mail from
+one), and an address with no visible relationship to the business scores
+lowest. That score is a **sort key for a human's eye**, never a promise. A
+harvested address never gets to skip the next step, however high it scores.
+
+**The confirm gate.** A harvested contact starts life unconfirmed, no matter
+its score, and the CSV export drops anything unconfirmed. A person has to open
+the lead, read the address and the note explaining where it came from, and
+click **Confirm** — which is the only thing that sets `contacts.confirmed_at`.
+Nothing else does, and nothing un-sets it once it is set. The export also
+drops anything with no email address and anything on the suppression list
+(the `cli suppress` command, for a bounce or an unsubscribe), so getting a
+contact into the outbound file takes all three: confirmed, has an email, not
+suppressed. ADR-029 explains why this is a brand-new `confirmed_at` column
+rather than reusing the existing `verification_status` field — they answer
+different questions ("did a human vouch for this" versus "does this address
+bounce"), and the second one is not implemented yet in v1.
+
+**The two guards on fuzzy domain matching.** Deciding whether
+`john@tryleisuration.com` belongs to a business at `leisuration.test` cannot
+be exact-string matching — real domains wrap the business's name in marketing
+prefixes, alternate TLDs, and suffixes. So the matcher strips those and checks
+whether one name-stem contains the other. Left alone, that rule is dangerously
+loose, so it is gated by two independent guards, and both are needed:
+
+- **A five-character floor.** Without it, a business at `pipe.test` would
+  match `john@pipeline.com`, because `pipe` really is a prefix of `pipeline`.
+- **A denylist of generic trade words** — `hvac`, `air`, `heating`,
+  `plumbing`, and 24 others. Without it, `acmeplumbing.test` would
+  match `john@plumbing.com`, because `plumbing` is eight letters and clears
+  the length floor easily.
+
+**The denylist matters more than the floor in this vertical.** Home-services
+domains are saturated with the exact words on that list — half the HVAC and
+plumbing companies in a given metro have one of them somewhere in their
+domain. The floor alone stops short generic words; it does nothing about long
+ones. Losing the denylist would score a large fraction of harvested addresses
+as a match to businesses they have no actual relationship to, which is the
+sort of error that looks fine in a demo and quietly ruins a real mailing list.
+
 ---
 
 ## 4. What is in the repository
@@ -143,7 +216,9 @@ backend/
     models/        the database tables (SQLAlchemy)
     domain/        pure logic — no network, no database, no framework
       rules/         the scoring engine
-      extractors/    turns raw data into facts
+      extractors/    turns raw data into facts, including emails.py — the
+                     fuzzy domain-matching harvester
+      email.py       normalizes addresses, compares domains
       hours.py       parses Google opening hours
       phone.py       validates US phone numbers
       segments.py    buckets businesses by review count
@@ -151,18 +226,20 @@ backend/
       sampling.py    picks a fair sample across segments
     clients/       the outside world — Serper, Firecrawl, SerpApi, plus fakes
     pipeline/      the five stages
-    services/      search plan, rulesets, budget guard, CSV export, outcomes
+    services/      search plan, rulesets, budget guard, CSV export, outcomes,
+                   contact_harvest.py (the email extractor's caller)
   cli.py           the Typer command line — the only entry point today
   config/          verticals, locations, and the scoring ruleset
-  tests/           181 test cases
+  tests/           481 test cases
   alembic/         database migrations
 frontend/                        the Next.js 16 dashboard (App Router)
   app/                             the five screens: /login, /leads,
                                    /leads/[cid], /runs, /runs/new, plus the
                                    /api/export CSV proxy
-  components/                      shadcn/ui primitives plus the five domain
+  components/                      shadcn/ui primitives plus the six domain
                                    components (ScorePair, QuadrantBadge,
-                                   CoverageIndicator, EvidenceQuote, SignalBadge)
+                                   CoverageIndicator, EvidenceQuote, SignalBadge,
+                                   ContactsCard)
   lib/                             api.ts — the ONLY path to the backend, and
                                    the only place the API key exists; auth.ts,
                                    types.ts, format.ts
@@ -177,7 +254,8 @@ docs/
 docker-compose.yml                Postgres 16, the API, and the dashboard
 ```
 
-Roughly 2,600 lines of application code and 2,600 lines of tests.
+Roughly 7,950 lines of application code and 7,800 lines of tests, backend and
+frontend combined, contacts included.
 
 **One rule is enforced automatically:** `app/domain/` may not import SQLAlchemy,
 httpx, FastAPI, Firecrawl, SerpApi, YAML, or anything from `app.models` or
@@ -193,9 +271,9 @@ No invented data — see section 6 for why that turned out to matter.
 
 ## 5. Build status
 
-All 17 tasks of Plan 1, all 11 of Plan 2, and all 9 of Plan 3 are implemented
-and reviewed. Rather than repeat the task list, here is
-what each command does — that is what you actually need:
+All 17 tasks of Plan 1, all 11 of Plan 2, all 9 of Plan 3, and all 11 of
+Plan 4 (contacts) are implemented and reviewed. Rather than repeat the task
+list, here is what each command does — that is what you actually need:
 
 | Command | What it does |
 |---|---|
@@ -208,10 +286,17 @@ what each command does — that is what you actually need:
 | `export` | Ranked CSV, filtered by quadrant and minimum fit |
 | `outcome` | Record what actually happened with a lead — the feedback loop |
 | `spend` | What this run, or everything, has cost so far |
+| `harvest-contacts` | Free, insert-only: pull candidate emails out of already-scraped HTML for a filtered batch of leads |
+| `export-contacts` | Confirmed, non-suppressed contacts for a filtered batch of leads, as CSV |
+| `suppress` | Add an address to the suppression list (bounce or unsubscribe) — excluded from every export from then on |
 | `POST /runs` | Queue a run (`status="queued"`); returns 201 immediately, does not execute inline |
 | `GET /runs/{id}` | Poll a queued or in-progress run's status |
 | `GET /leads`, `GET /leads/{cid}` | Filtered, paginated leads and lead detail for the dashboard |
 | `PUT /leads/{cid}/outcome`, `PUT /leads/{cid}/manual-facts` | The same feedback loop and manual capture, from the API |
+| `POST /leads/{cid}/contacts`, `PUT /contacts/{id}`, `DELETE /contacts/{id}` | Add, edit, or remove one contact on one lead |
+| `POST /contacts/{id}/confirm` | A human vouches for a contact — the only thing that sets `confirmed_at` |
+| `POST /leads/{cid}/contacts/harvest`, `POST /contacts/harvest` | Harvest one lead's website, or a whole filtered batch at once |
+| `GET /contacts/export.csv` | The dashboard's export button — same filters and confirm gate as `export-contacts` |
 
 Plan 3 adds the dashboard — a Next.js App Router frontend, nine tasks:
 
@@ -223,9 +308,11 @@ Plan 3 adds the dashboard — a Next.js App Router frontend, nine tasks:
 | `/runs` | Every run, with its error, and polling while one is in flight |
 | `/runs/new` | Pick a vertical and a state, see the queries, the count and the honest search-only cost estimate, then confirm or cancel |
 
-Two screens named in the spec were deliberately cut, both with an ADR:
-ruleset compare (ADR-026's sibling — only one ruleset exists) and the contacts
-form (ADR-027 — there is no contacts endpoint). 14 of the spec's 15 frontend
+One screen named in the spec is still deliberately cut, with an ADR: ruleset
+compare (ADR-026's sibling — only one ruleset exists). The contacts form,
+which ADR-027 had cut for the same reason ("no endpoint serves the table"),
+is now built — ADR-028 reverses that decision once outreach needed contacts
+badly enough to justify building the endpoint. All 15 of the spec's frontend
 user stories are covered; each is asserted by a Playwright spec in
 `frontend/e2e/` that runs against the real seeded API, not against mocks.
 
@@ -233,10 +320,11 @@ Plan 2 adds an in-process APScheduler, started with the app's lifespan: it polls
 every 30 seconds and executes queued runs, so `POST /runs` only enqueues — the
 scheduler is what actually calls `execute_run`.
 
-320 backend tests and 60 frontend tests pass, `mypy app cli.py` is clean,
-`tsc --noEmit` is clean, both import contracts hold, and the 18-case Playwright
-suite (14 user-story specs plus axe on four screens) passes against the running
-stack.
+481 backend tests and 132 frontend tests pass, `mypy app cli.py` is clean,
+`tsc --noEmit` is clean, both import contracts hold, and the 31-case Playwright
+suite passes against the running stack — including the contacts
+harvest-confirm-export flow, run end to end three times against one persisted
+database with no reset in between.
 The API and CLI now share one Docker image (`backend/Dockerfile`, ADR-017); `docker
 compose up db api` runs the service, and the CLI runs inside the same image via
 `docker compose run --rm api python -m cli ...`.
@@ -363,6 +451,111 @@ Playwright run against a real seeded backend rather than mocked responses. That
 decision paid for itself twice over here: mocked responses would have happily
 echoed whatever the form sent.
 
+### What the contacts plan got wrong
+
+Contacts (Plan 4) was run differently from the three phases above: instead of
+one big-bang final review at the end, a running ledger was checked before
+every task was dispatched and updated after every review, specifically to
+catch the seam problems the earlier final reviews had to find the hard way.
+That mostly worked — nothing here needed a second pass of fixes on top of a
+fix round the way the pipeline's error handling or the API's run-ownership
+race did. But it did not make the plan itself perfect, and the honest story
+has two distinct halves.
+
+**Caught before any code existed**, by re-reading the plan's own prose against
+itself:
+
+1. **The contact ordering would have buried your own typed contacts.** A
+   harvested contact carries a confidence score; a manually typed one does
+   not — its confidence is `NULL`. Sorting by confidence, as first drafted,
+   put every `NULL` last, so a human's own entry would have sorted below
+   harvested junk on the one screen meant to show it first.
+2. **Deduplication was scoped to one page instead of one business.** A
+   website with the same footer address on two different pages would have
+   tried to insert that address twice, and the second insert would have hit
+   the unique `(business_id, email)` constraint and raised `IntegrityError` —
+   a crash caused by a business simply putting its email in more than one
+   place, which real sites do constantly.
+3. **Two of the guard tests each tripped both guards at once.** The
+   domain-matching guards — a five-character length floor and a denylist of
+   generic trade words — are meant to be tested in isolation, one case per
+   guard. A case like `john@repair.com` against site `air.com` fails the
+   length floor (`air` is three letters) *and* sits on the denylist at the
+   same time, so it would still fail correctly with either guard deleted —
+   proving nothing about the one it was supposedly testing.
+4. **The demo seed data would have hidden a broken extractor.** The seeded
+   businesses used `.example.com` websites, and `example.com` is on the
+   harvester's own vendor-domain denylist (it leaks out of CMS boilerplate
+   constantly, so it is rejected on sight). The seeded end-to-end harvest test
+   would have passed against a completely broken extractor, because every
+   candidate address would have been rejected for the wrong reason and the
+   test could not tell the difference. Fixed by moving the seed to `.test`
+   domains, which exist for exactly this purpose and appear on no such list.
+
+**Caught only once real code existed** — by an implementer or a reviewer
+opening the actual file, not by anyone re-reading the plan more carefully:
+
+1. **A test that could not have run.** The plan's own literal test code built
+   one case as `ContactIn(name="John", **{"name": ...})` — a duplicate
+   keyword argument. Python raises `TypeError` constructing that call before
+   Pydantic's validation ever gets a turn, so the test would have failed for
+   a reason that had nothing to do with what it was supposed to check.
+2. **A missing import.** The plan's router code typed the `PUT` handler's body
+   as `ContactUpdate` but only ever imported `ContactIn` — a `NameError` the
+   moment the module loaded. Prose that never runs cannot catch that; a test
+   collection immediately would have, and did.
+3. **A guessed column name the plan had explicitly flagged as unverified.**
+   After a self-join, SQLAlchemy suffixes the second table's `id` column to
+   avoid a collision. The plan's illustrative code did not check which column
+   ended up named `id` and which became `id_1` — it said so, in so many
+   words, before dispatch. The implementer checked `.c.keys()` against the
+   real query instead of trusting the plan's guess, which would have wired
+   the suppression filter to the wrong column.
+4. **A component test that passed no matter what the code under test did.**
+   A test asserted `getAllByText(email).length > 0` to check that a
+   contact's display name falls back to its email address when no name is
+   given. But the same email is *also* rendered on its own as a `mailto:`
+   link, independently of the fallback — so that assertion was already
+   satisfied before the fallback code ran a single time. Deleting the
+   fallback left the test green.
+5. **A form that discarded what the user just typed.** The "add contact"
+   form cleared itself the instant the request was sent, before the response
+   came back. An ordinary 409 — the address was already harvested, which is
+   an expected outcome, not a bug — or a 422 validation error would silently
+   wipe out everything the user had just filled in, with no error shown to
+   explain why.
+6. **Three places where the plan's frontend prose no longer matched the
+   router that had actually shipped by the time the frontend tasks began.**
+   The plan had the add action taking a raw `FormData` object where the real
+   contract needed a typed `ContactIn`; it had confirming a contact as a
+   `PUT` where the real endpoint is a `POST`; and it treated harvesting one
+   lead and harvesting a whole filtered batch as one endpoint with an
+   optional argument, when the router that shipped in an earlier task had
+   already made them two separate endpoints.
+
+The first four were caught by reading the plan more carefully before writing
+any code. The other six were caught only by reading the code itself — the
+plan's prose could describe an interface however it liked, and nothing forced
+it to be right until an implementer opened the file it was describing. That
+is the same lesson Plan 2's development log drew from six similar defects:
+read the interface, don't recall it.
+
+**Mutation testing earned its place twice, for real.** The two domain-matching
+guards above (item 3) and the export's confirm gate share the same proof
+standard: comment out the rule, and the one test that exists to catch exactly
+that should turn red — nothing else should even notice. In the extractor,
+removing the length floor failed only
+`test_the_length_floor_stops_a_short_stem_matching_a_longer_word`; removing
+the generic-token denylist failed only
+`test_the_generic_token_denylist_stops_a_shared_trade_word`. In the export
+filter, each of the three predicates — confirmed, has an email, not
+suppressed — was removed on its own, and each time exactly one test went red.
+That is the actual, checkable difference between a guard and a decoration: a
+decoration can be deleted with the whole suite still green, which is
+precisely what item 3 above shows happening to a test that looked fine on the
+page. It is why the plan made mutation proof mandatory at both spots instead
+of leaving it as good practice to remember.
+
 ### The tests that could not catch their own bugs
 
 Three separate times on this branch, a test was written around the bug it was
@@ -385,6 +578,9 @@ test guarding a rule in this document — break the code first, watch it go red.
 
 **No known bugs.** One critical and five important findings from the dashboard's
 final review are fixed and independently re-verified against the running stack.
+Contacts has no critical or important findings open on the branch — see
+section 6 for what its review process caught and fixed along the way. A
+handful of minor items were deferred deliberately; they are listed below.
 
 **Decisions waiting on you**, not defects:
 
@@ -397,6 +593,16 @@ final review are fixed and independently re-verified against the running stack.
 - **Neither lead-detail form confirms a save.** The value persists, but nothing
   says so — a `<Toaster />` is mounted and unused. The most-used screen in the
   app, so worth doing before real daily use.
+- **Clicking Confirm or Delete on a contact shows nothing if it fails.**
+  `frontend/components/contacts-card.tsx` wires `onConfirm`/`onDelete`
+  straight through with no `.then`/`.catch`, unlike `handleAdd`, which has
+  one. A failed confirm shows the user nothing while the contact silently
+  stays out of the export — exactly the confusion the confirm gate exists to
+  prevent, and reachable on an everyday network hiccup, not just a rare edge
+  case. This is the same silent-failure shape the add-contact form had and
+  was fixed for during Task 8's review; it survived here because that
+  review's finding was scoped to add, not to confirm and delete. Worth the
+  same fix.
 
 **Deliberately deferred**, none with a failure scenario today:
 
@@ -412,11 +618,19 @@ final review are fixed and independently re-verified against the running stack.
   "Page 99 of 1"; the runs pagination drops other query parameters.
 - Outcome notes are write-only — saved, never displayed back.
 - The Dockerfiles run as root; the compose services have no restart policy.
+- Two people creating or editing a contact with the same email at the same
+  instant could still both get past the pre-insert duplicate check and hit
+  the database's unique constraint as a raw `IntegrityError` rather than a
+  clean 409. (`confirm_contact` itself only reads and sets `confirmed_at` —
+  it never touches `email` and runs no duplicate check, so confirming is not
+  part of this race.) Single-admin usage makes this unlikely in practice; the
+  `_clear_other_primaries` path elsewhere already treats its own unique index
+  as a backstop for exactly this race, and the duplicate-email check does not.
 
-**Not built yet:** contact discovery and email outreach. The `contacts` table
-exists with no API and no UI (ADR-007, ADR-027) — that is the seam, and it is
-where the next plan starts. Also unbuilt: the ruleset-compare screen, which waits
-until a second ruleset exists, and any vertical beyond HVAC.
+**Not built yet:** email outreach itself — contacts can now be entered,
+harvested, confirmed, and exported, but nothing sends anything. Also unbuilt:
+the ruleset-compare screen, which waits until a second ruleset exists, and any
+vertical beyond HVAC.
 
 **Machine note:** Homebrew's `postgresql@14` is stopped because it collides with
 the Docker database on port 5432. Starting it breaks this project until you stop
@@ -435,6 +649,26 @@ docker compose run --rm api python -m cli seed-demo    # idempotent demo data
 open http://localhost:3000                             # sign in with DASHBOARD_PASSWORD
 ```
 
+If your database was already seeded before this branch, `seed-demo` will
+skip re-inserting anything -- `_already_seeded` only checks whether any
+`seed-`-prefixed business exists, so it never notices that the new
+harvestable `RawPayload` (seed-01) and `Contact` (seed-02) rows are missing.
+"Harvest from website" on seed-01 will then report `created: 0` and look
+broken. Fix it by deleting the old seed rows and reseeding:
+
+```bash
+docker compose exec db psql -U postgres -d leadgen -c "
+  DELETE FROM signals     WHERE business_id IN (SELECT id FROM businesses WHERE cid LIKE 'seed-%');
+  DELETE FROM scores      WHERE business_id IN (SELECT id FROM businesses WHERE cid LIKE 'seed-%');
+  DELETE FROM raw_payloads WHERE business_id IN (SELECT id FROM businesses WHERE cid LIKE 'seed-%');
+  DELETE FROM contacts    WHERE business_id IN (SELECT id FROM businesses WHERE cid LIKE 'seed-%');
+  DELETE FROM reviews     WHERE business_id IN (SELECT id FROM businesses WHERE cid LIKE 'seed-%');
+  DELETE FROM businesses  WHERE cid LIKE 'seed-%';
+  DELETE FROM runs WHERE (status = 'complete' AND created_at = '2026-09-01 09:00:00')
+                      OR (status = 'failed'   AND created_at = '2026-09-01 10:00:00');"
+docker compose run --rm api python -m cli seed-demo
+```
+
 `web` reaches the API at `http://api:8000` — the compose service name, never
 `localhost`. Only the browser talks to Next.js and only Next.js talks to the
 API, so `API_KEY` lives in the `web` container's environment and is never
@@ -447,7 +681,7 @@ cd backend
 pip install -e ".[dev]"
 cp .env.example .env             # fill in SERPER_KEY, FIRECRAWL_KEY, SERPAPI_KEY
 alembic upgrade head
-pytest                           # 320 tests, no API keys needed
+pytest                           # 481 tests, no API keys needed
 lint-imports                     # enforces the domain-layer boundary
 ```
 
@@ -456,7 +690,7 @@ Frontend checks:
 ```bash
 cd frontend
 npm ci
-npx vitest run                   # 60 unit tests
+npx vitest run                   # 132 unit tests
 npx tsc --noEmit
 npx playwright test              # needs the compose stack up and seeded
 ```
@@ -474,7 +708,8 @@ exactly the frontend/backend contract mismatches the suite exists to catch.
 | Question | File |
 |---|---|
 | Why is it built this way? | `docs/decisions/DECISIONS.md` |
-| What is the full design? | `docs/superpowers/specs/2026-08-27-lead-generation-system-design.md` |
-| What is left to build? | Deployment (ADR-026), the contacts endpoint and its form (ADR-027), ruleset compare once a second ruleset exists |
+| What is the full design? | `docs/superpowers/specs/2026-08-27-lead-generation-system-design.md`, and `docs/superpowers/specs/2026-09-04-contacts-design.md` for contacts |
+| What is left to build? | Deployment (ADR-026), email outreach itself, ruleset compare once a second ruleset exists |
 | What happened during the build? | the `git log` — one commit per feature, `fix:` where a review found something |
 | How is a business scored? | `backend/config/rulesets/hvac_v1.yaml` |
+| How does contact harvesting decide confidence? | `backend/app/domain/extractors/emails.py` |

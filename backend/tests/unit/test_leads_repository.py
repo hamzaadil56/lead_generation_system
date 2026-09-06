@@ -4,7 +4,7 @@ from datetime import datetime
 from app.domain.rules.models import RuleReason
 from app.models.business import Business, BusinessStatus
 from app.models.derived import Review, Score, Signals
-from app.models.manual import Outcome
+from app.models.manual import Contact, Outcome
 from app.repositories.leads import LeadFilters, get_lead_detail, list_leads
 
 # Built from the engine's own dataclass, then `asdict`-ed exactly the way
@@ -145,6 +145,34 @@ def test_list_leads_and_detail_show_a_single_outcome_exactly_once(session):
     detail = get_lead_detail(session, "c1")
     assert detail is not None
     assert detail.lead.outcome_status == "contacted"
+
+
+def test_lead_detail_returns_contacts_best_first(session):
+    """A manually typed contact has confidence NULL (it is the harvester's
+    score, and a human is not producing a value on that scale). Ordering on
+    confidence alone would therefore sort the address you typed BELOW a
+    harvested 0.3 that is probably a stranger -- so confirmed status has to
+    outrank confidence."""
+    b = _business(session, "c1", "Contactable Air")
+    session.add(Contact(business_id=b.id, name=None, email="unconfirmed@example.com",
+                        source="website", confidence=0.9, is_primary=False,
+                        confirmed_at=None))
+    session.add(Contact(business_id=b.id, name="Confirmed Contact",
+                        email="confirmed@example.com", source="manual",
+                        confidence=None, is_primary=False,
+                        confirmed_at=datetime(2026, 8, 1)))
+    session.add(Contact(business_id=b.id, name="Primary Contact",
+                        email="primary@example.com", source="manual",
+                        confidence=None, is_primary=True,
+                        confirmed_at=datetime(2026, 8, 1)))
+    session.commit()
+
+    detail = get_lead_detail(session, "c1")
+
+    assert detail is not None
+    assert [c.email for c in detail.contacts] == [
+        "primary@example.com", "confirmed@example.com", "unconfirmed@example.com",
+    ]
 
 
 def test_get_lead_detail_works_for_a_business_with_no_score_yet(session):

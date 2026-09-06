@@ -8,6 +8,7 @@ from sqlalchemy.orm import Query, Session
 from app.models.business import Business
 from app.models.derived import Review, Score, Signals
 from app.models.manual import ManualFacts, Outcome
+from app.repositories.contacts import list_for_business
 from app.schemas.leads import (EvidenceOut, LeadDetailOut, LeadOut,
                                ManualFactsOut, ReasonOut, ScoreOut)
 
@@ -164,4 +165,5 @@ def get_lead_detail(session: Session, cid: str,
     return LeadDetailOut(
         lead=lead, score=score_out, reasons=reasons, signals=signals,
         evidence=evidence,
-        manual_facts=ManualFactsOut.model_validate(facts) if facts else None)
+        manual_facts=ManualFactsOut.model_validate(facts) if facts else None,
+        contacts=list_for_business(session, business.id))

@@ -9,6 +9,8 @@ from app.clients.serpapi_reviews import SerpApiReviewProvider
 from app.clients.serper import SerperClient
 from app.core.config import get_settings
 from app.core.db import get_session
+from app.domain.email import normalize_email
+from app.models.manual import Suppression
 from app.models.run import Run
 from app.pipeline.base import StageReport
 from app.pipeline.discover import DiscoverStage
@@ -16,8 +18,11 @@ from app.pipeline.extract_signals import ExtractSignalsStage
 from app.pipeline.fetch_reviews import FetchReviewsStage
 from app.pipeline.score import ScoreStage
 from app.pipeline.scrape_site import ScrapeSiteStage
+from app.repositories.leads import LeadFilters
 from app.scheduler import reset_stuck_runs
 from app.services.budget import spend_usd
+from app.services.contact_export import export_contacts
+from app.services.contact_harvest import harvest_for_filters
 from app.services.export import export_leads
 from app.services.outcomes import record_outcome
 from app.services.rulesets import read_ruleset_definition, read_ruleset_file
@@ -203,6 +208,59 @@ def export_cmd(out: Path = Path("leads.csv"), quadrant: str | None = None,
     with get_session() as s:
         count = export_leads(s, quadrant, min_fit, out, ruleset_version=version)
         typer.echo(f"exported {count} ({version}) -> {out}")
+
+
+@app.command()
+def suppress(email: str, reason: str = "unsubscribed") -> None:
+    """Never email this address again.
+
+    Without this command the suppressions table can never hold a row and the
+    export's third predicate is dead code. Normalised through the same
+    function the harvester uses, and upserted on the primary key, so
+    suppressing twice is not an error.
+    """
+    valid = {"unsubscribed", "bounced", "complained", "manual"}
+    if reason not in valid:
+        raise typer.BadParameter(f"reason must be one of {sorted(valid)}")
+    address = normalize_email(email)
+    if address is None:
+        raise typer.BadParameter(f"not a valid email: {email}")
+    with get_session() as s:
+        row = s.get(Suppression, address)
+        if row is None:
+            s.add(Suppression(email=address, reason=reason, source="cli",
+                              created_at=datetime.utcnow()))
+        else:
+            row.reason = reason
+        s.commit()
+        typer.echo(f"suppressed {address} ({reason})")
+
+
+@app.command("harvest-contacts")
+def harvest_contacts_cmd(quadrant: str | None = None, min_fit: int = 0,
+                         vertical: str = "hvac") -> None:
+    """Harvest addresses from cached HTML. Free -- calls no provider."""
+    version = _ruleset(vertical).version
+    with get_session() as s:
+        result = harvest_for_filters(s, LeadFilters(
+            quadrant=quadrant, min_fit=min_fit, ruleset_version=version))
+        typer.echo(f"harvested {result.created} contacts "
+                   f"across {result.businesses} businesses")
+
+
+@app.command("export-contacts")
+def export_contacts_cmd(out: Path = Path("contacts.csv"),
+                        quadrant: str | None = None, min_fit: int = 0,
+                        vertical: str = "hvac") -> None:
+    # `ruleset_version` is threaded through explicitly rather than
+    # hardcoded: the leads export shipped hardcoded to "hvac_v1" and a
+    # second vertical exported zero rows -- a failure that reads as "no
+    # leads matched" rather than as a bug.
+    version = _ruleset(vertical).version
+    with get_session() as s:
+        count = export_contacts(s, LeadFilters(
+            quadrant=quadrant, min_fit=min_fit, ruleset_version=version), out)
+        typer.echo(f"exported {count} contacts -> {out}")
 
 
 @app.command()

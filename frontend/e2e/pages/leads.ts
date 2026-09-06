@@ -23,6 +23,15 @@ export class LeadsPage {
     const path = await download.path();
     return readFileSync(path, "utf-8").trim().split("\n").slice(1);
   }
+  /** Click Export contacts CSV and hand back its data rows (header dropped). */
+  async exportContactsCsvRows(): Promise<string[]> {
+    const [download] = await Promise.all([
+      this.page.waitForEvent("download"),
+      this.page.getByRole("link", { name: "Export contacts CSV" }).click(),
+    ]);
+    const path = await download.path();
+    return readFileSync(path, "utf-8").trim().split("\n").slice(1);
+  }
   async expectEmptyState() {
     await expect(this.page.getByText(/no leads match/i)).toBeVisible();
   }

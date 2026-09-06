@@ -6,7 +6,8 @@ os.environ.setdefault("SERPER_KEY", "x")
 os.environ.setdefault("FIRECRAWL_KEY", "x")
 
 from app.models.business import Business, BusinessStatus
-from app.models.derived import Review, Score, Signals
+from app.models.derived import RawPayload, Review, Score, Signals
+from app.models.manual import Contact
 from app.models.run import Run
 from app.services.seed import seed_demo
 
@@ -27,14 +28,17 @@ def test_seed_is_idempotent(session):
 def test_seed_is_deterministic(session):
     a = seed_demo(session)
     names_a = sorted(b.name for b in session.query(Business).all())
-    # Review and Signals also FK to Business (no ON DELETE CASCADE in the
-    # schema), so both must go before Business or the delete below violates
-    # a foreign key. Run is cleared too: `_already_seeded` only checks
-    # Business, so leaving the two seed Run rows in place while wiping
-    # Business would make the reseed below insert a *second* pair of Run
-    # rows alongside the surviving ones -- a real wipe clears all of it.
+    # Review, Signals, Contact and RawPayload also FK to Business (no ON
+    # DELETE CASCADE in the schema), so all four must go before Business or
+    # the delete below violates a foreign key. Run is cleared too:
+    # `_already_seeded` only checks Business, so leaving the two seed Run
+    # rows in place while wiping Business would make the reseed below insert
+    # a *second* pair of Run rows alongside the surviving ones -- a real wipe
+    # clears all of it.
     session.query(Review).delete()
     session.query(Signals).delete()
+    session.query(Contact).delete()
+    session.query(RawPayload).delete()
     session.query(Score).delete()
     session.query(Business).delete()
     session.query(Run).delete()
@@ -82,8 +86,13 @@ def test_seed_is_deterministic_in_every_column(session):
     seed_demo(session)
     first = snapshot()
 
+    # Contact and RawPayload FK to Business too (no ON DELETE CASCADE), so
+    # both must be cleared before Business -- see the comment in
+    # test_seed_is_deterministic.
     session.query(Review).delete()
     session.query(Signals).delete()
+    session.query(Contact).delete()
+    session.query(RawPayload).delete()
     session.query(Score).delete()
     session.query(Business).delete()
     session.query(Run).delete()

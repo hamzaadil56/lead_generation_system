@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { ApiError, apiGet, apiSend } from "@/lib/api";
+import { ApiError, apiDelete, apiGet, apiSend } from "@/lib/api";
 
 const originalFetch = global.fetch;
 
@@ -69,4 +69,32 @@ it("refuses to run if API_KEY is unset", async () => {
   delete process.env.API_KEY;
   mockFetch(200, {});
   await expect(apiGet("/health")).rejects.toThrow(/API_KEY/);
+});
+
+it("apiDelete sends DELETE and never parses a 204 body", async () => {
+  const fn = vi.fn().mockResolvedValue({
+    ok: true, status: 204,
+    // A 204 has no body: calling .json() on it must not happen.
+    json: async () => { throw new Error("must not parse a 204 body"); },
+    text: async () => "",
+  });
+  global.fetch = fn as unknown as typeof fetch;
+  await expect(apiDelete("/contacts/1")).resolves.toBeUndefined();
+  expect(fn.mock.calls[0][1].method).toBe("DELETE");
+});
+
+it("apiDelete surfaces a failure as ApiError", async () => {
+  mockFetch(404, { detail: "no such contact: 1" });
+  await expect(apiDelete("/contacts/1")).rejects.toMatchObject({
+    status: 404, detail: "no such contact: 1",
+  });
+});
+
+it("apiSend forwards query params for endpoints that take filters, not a body", async () => {
+  // POST /contacts/harvest takes its filters as query params (FastAPI query
+  // params, not a JSON body) -- the same shape GET endpoints use.
+  const fn = mockFetch(200, { created: 3, businesses: 2 });
+  await apiSend("POST", "/contacts/harvest", undefined, { quadrant: "go_now" });
+  const url = String(fn.mock.calls[0][0]);
+  expect(url).toContain("quadrant=go_now");
 });

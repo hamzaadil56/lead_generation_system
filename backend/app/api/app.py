@@ -123,8 +123,8 @@ def create_app(*, disable_scheduler: bool = False) -> FastAPI:
         log.warning("api.bad_request", path=request.url.path, error=str(exc))
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 
-    from app.api.routers import leads, meta, runs
-    for router in (runs.router, leads.router, meta.router):
+    from app.api.routers import contacts, leads, meta, runs
+    for router in (runs.router, leads.router, meta.router, contacts.router):
         app.include_router(router, dependencies=[Depends(require_api_key)])
 
     return app

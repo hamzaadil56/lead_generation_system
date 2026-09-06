@@ -2,6 +2,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
+from app.schemas.contacts import ContactOut
+
 
 class ReasonOut(BaseModel):
     """One rule's contribution, straight from `Score.reasons`.
@@ -94,3 +96,7 @@ class LeadDetailOut(BaseModel):
     evidence: list[EvidenceOut]
     # None means nobody has entered manual facts for this lead yet.
     manual_facts: ManualFactsOut | None = None
+    # Contacts ride along with the detail the page already fetches. There is
+    # deliberately no GET /leads/{cid}/contacts: a second read path for the
+    # same data is a second way to be wrong about it.
+    contacts: list[ContactOut] = []
