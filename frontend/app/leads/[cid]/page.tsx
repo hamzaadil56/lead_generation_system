@@ -89,13 +89,27 @@ export default async function LeadDetail({
 
   async function confirmContact(id: number) {
     "use server";
-    await apiSend("POST", `/contacts/${id}/confirm`, undefined);
+    try {
+      await apiSend("POST", `/contacts/${id}/confirm`, undefined);
+    } catch (e) {
+      // A 404 (deleted in another tab), a 500, or a network blip must not
+      // vanish as an unhandled rejection: the badge would stay "Unconfirmed"
+      // and the export would keep skipping this contact with nothing on
+      // screen to explain why. Surface it the same way addContact does.
+      if (e instanceof ApiError) return { error: e.detail };
+      throw e;
+    }
     revalidatePath(`/leads/${cid}`);
   }
 
   async function deleteContact(id: number) {
     "use server";
-    await apiDelete(`/contacts/${id}`);
+    try {
+      await apiDelete(`/contacts/${id}`);
+    } catch (e) {
+      if (e instanceof ApiError) return { error: e.detail };
+      throw e;
+    }
     revalidatePath(`/leads/${cid}`);
   }
 

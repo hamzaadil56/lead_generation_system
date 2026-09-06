@@ -7,6 +7,7 @@ contacts, and emits a blank-email row for every business with none.
 import csv
 from pathlib import Path
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.manual import Contact, Suppression
@@ -61,7 +62,7 @@ def export_contacts(session: Session, filters: LeadFilters,
                 base.c.pain_score,
                 base.c.quadrant)
             .join(base, base.c.id == Contact.business_id)
-            .outerjoin(Suppression, Suppression.email == Contact.email)
+            .outerjoin(Suppression, func.lower(Suppression.email) == Contact.email)
             .filter(Contact.confirmed_at.isnot(None),
                     Contact.email.isnot(None),
                     Suppression.email.is_(None))

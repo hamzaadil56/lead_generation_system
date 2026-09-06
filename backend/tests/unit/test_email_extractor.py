@@ -89,22 +89,25 @@ def test_a_subdomain_of_the_site_scores_highest():
 
 
 def test_same_name_different_tld():
-    got = _one("<p>john@leisuration.net</p>")
+    """`.example` rather than `.test` on purpose: this tier needs the stem to
+    match the site's while the TLD differs, so the two halves of the fixture
+    have to sit under different reserved TLDs (RFC 6761 gives us both)."""
+    got = _one("<p>john@leisuration.example</p>")
     assert got.confidence == 0.85
     assert got.note == SAME_NAME_OTHER_TLD
 
 
 def test_a_try_prefixed_marketing_domain_is_a_variant_not_a_stranger():
-    """The case exact-equality matching gets wrong: `tryleisuration.com`
+    """The case exact-equality matching gets wrong: `tryleisuration.test`
     against site `leisuration.test` is almost certainly the owner, and
     scoring it 0.3 buries it at the bottom of the list looking like junk."""
-    got = _one("<p>john@tryleisuration.com</p>")
+    got = _one("<p>john@tryleisuration.test</p>")
     assert got.confidence == 0.8
     assert got.note == DOMAIN_VARIANT
 
 
 def test_a_suffixed_domain_is_a_variant():
-    got = _one("<p>john@leisurationhvac.com</p>")
+    got = _one("<p>john@leisurationhvac.test</p>")
     assert got.confidence == 0.8
     assert got.note == DOMAIN_VARIANT
 
@@ -114,7 +117,7 @@ def test_a_domain_matching_the_business_name_but_not_the_website():
     legacy or rebranded domain. Do not use a site like `leisurationair.test`
     here: its stem starts with `leisuration`, so the containment rule fires
     first and returns 0.8, and the test would be asserting the wrong tier."""
-    got = _one("<p>john@leisuration.com</p>", site="coolbreezehvac.test",
+    got = _one("<p>john@leisuration.test</p>", site="coolbreezehvac.test",
                name="Leisuration Air Conditioning, LLC")
     assert got.confidence == 0.75
     assert got.note == MATCHES_BUSINESS_NAME
@@ -151,7 +154,7 @@ def test_an_unrelated_domain_scores_lowest():
 #
 # Each of the next two isolates ONE guard: the case is constructed so that
 # exactly one guard rejects it, and the test therefore fails if that guard is
-# deleted. A case like `john@repair.com` vs site `air.com` LOOKS like a
+# deleted. A case like `john@repair.test` vs site `air.test` LOOKS like a
 # length-floor test but trips both guards at once (`air` is under five
 # characters AND on the denylist), so it survives either guard's removal and
 # tests neither. A guard test that passes with its own guard gone is not a
@@ -160,7 +163,7 @@ def test_an_unrelated_domain_scores_lowest():
 def test_the_length_floor_stops_a_short_stem_matching_a_longer_word():
     """`pipe` is a prefix of `pipeline` and is not a generic token, so only
     the five-character floor rejects this."""
-    got = _one("<p>john@pipeline.com</p>", site="pipe.test", name="Pipe Co")
+    got = _one("<p>john@pipeline.test</p>", site="pipe.test", name="Pipe Co")
     assert got.confidence == 0.3
     assert got.note == UNRELATED
 
@@ -171,7 +174,7 @@ def test_the_generic_token_denylist_stops_a_shared_trade_word():
     with these words -- without the denylist a large fraction of harvested
     contacts would score 0.8 against businesses they have no relationship
     to."""
-    got = _one("<p>john@plumbing.com</p>", site="acmeplumbing.test",
+    got = _one("<p>john@plumbing.test</p>", site="acmeplumbing.test",
                name="Acme Plumbing")
     assert got.confidence == 0.3
     assert got.note == UNRELATED
@@ -196,6 +199,6 @@ def test_the_highest_confidence_wins_when_one_address_scores_twice():
 
 
 def test_a_business_with_no_website_still_scores_against_its_name():
-    got = _one("<p>john@leisuration.com</p>", site=None,
+    got = _one("<p>john@leisuration.test</p>", site=None,
                name="Leisuration Air")
     assert got.confidence == 0.75

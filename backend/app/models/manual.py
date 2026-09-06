@@ -55,9 +55,13 @@ class Contact(Base):               # PERMANENT — manual in v1, resolvers in v2
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
     # default=utcnow: the column existed from the initial migration but
     # nothing ever set it, so every row would have carried a NULL creation
-    # time.
-    created_at: Mapped[datetime | None] = mapped_column(DateTime,
-                                                        default=datetime.utcnow)
+    # time. server_default mirrors the `now()` the c9af97b1b25c migration set
+    # at the database level -- without it here, `alembic upgrade head` and
+    # `Base.metadata.create_all` (what tests/conftest.py builds) produce
+    # different schemas, and `alembic revision --autogenerate` sees a
+    # permanent phantom diff.
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime, default=datetime.utcnow, server_default=text("now()"))
     verified_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     # Answers "did a human decide this is a person worth emailing, and when?"

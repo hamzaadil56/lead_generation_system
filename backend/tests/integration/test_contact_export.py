@@ -74,6 +74,28 @@ def test_the_export_emits_only_confirmed_unsuppressed_addressed_contacts(
     assert [r["email"] for r in rows] == ["good@acme.test"]
 
 
+def test_a_mixed_case_suppression_row_still_excludes_the_contact(session, tmp_path):
+    """Spec §8.1 mandates `lower(suppressions.email) = contacts.email` because
+    `suppressions` has an uncontrolled write path (a hand-run INSERT during an
+    incident) that `cli suppress`'s own normalisation cannot protect against.
+    Contact.email is always stored lowercase (app/schemas/contacts.py), so a
+    mixed-case suppressions row is the only way to exercise the join's own
+    case-insensitivity rather than the write-time normalisation."""
+    business = _scored_business(session, quadrant="go_now")
+    session.add(Contact(business_id=business.id, email="gone@acme.test",
+                        source="manual", confirmed_at=datetime(2026, 9, 1)))
+    session.add(Suppression(email="Gone@ACME.test", reason="unsubscribed",
+                            source="manual", created_at=datetime(2026, 9, 1)))
+    session.commit()
+
+    path = tmp_path / "contacts.csv"
+    count = export_contacts(session, LeadFilters(), path)
+
+    rows = list(csv.DictReader(path.open()))
+    assert count == 0
+    assert rows == []
+
+
 def test_the_export_carries_the_business_columns_for_mail_merge(session, tmp_path):
     business = _scored_business(session, quadrant="go_now", fit=90, pain=80,
                                 name="Leisuration Air",

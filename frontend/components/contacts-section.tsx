@@ -8,17 +8,24 @@ import type { ContactIn, ContactOut } from "@/lib/types";
  *  a rejected add (`.catch(() => {})`, deliberately, so the form the user
  *  just typed into is never wiped by a routine failure) — which means the
  *  message from a 409 duplicate-address or 422 validation error has to be
- *  shown from here, before that swallow, not from ContactsCard itself. */
+ *  shown from here, before that swallow, not from ContactsCard itself.
+ *
+ *  Confirm and delete get the identical treatment for the identical reason:
+ *  ContactRow's onClick hands their promise nowhere (unlike add, there is no
+ *  form to protect from a reset, so nothing here needs to re-throw), so a
+ *  404/500/network failure has to be caught and surfaced here or it vanishes
+ *  as an unhandled rejection while the row stays on screen looking fine. */
 export function ContactsSection({ contacts, website, addContact, confirmContact,
                                   deleteContact, harvestContacts }: {
   contacts: ContactOut[];
   website: string | null;
   addContact: (contact: ContactIn) => Promise<{ error: string } | undefined>;
-  confirmContact: (id: number) => Promise<void>;
-  deleteContact: (id: number) => Promise<void>;
+  confirmContact: (id: number) => Promise<{ error: string } | undefined>;
+  deleteContact: (id: number) => Promise<{ error: string } | undefined>;
   harvestContacts: () => Promise<void>;
 }) {
   const [addError, setAddError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const actions: ContactsCardActions = {
     async add(contact) {
@@ -32,8 +39,14 @@ export function ContactsSection({ contacts, website, addContact, confirmContact,
       }
       setAddError(null);
     },
-    confirm: confirmContact,
-    remove: deleteContact,
+    async confirm(id) {
+      const result = await confirmContact(id);
+      setActionError(result?.error ?? null);
+    },
+    async remove(id) {
+      const result = await deleteContact(id);
+      setActionError(result?.error ?? null);
+    },
     harvest: harvestContacts,
   };
 
@@ -41,6 +54,9 @@ export function ContactsSection({ contacts, website, addContact, confirmContact,
     <div className="space-y-2">
       {addError && (
         <p role="alert" className="text-sm text-destructive">{addError}</p>
+      )}
+      {actionError && (
+        <p role="alert" className="text-sm text-destructive">{actionError}</p>
       )}
       <ContactsCard contacts={contacts} actions={actions} website={website} />
     </div>

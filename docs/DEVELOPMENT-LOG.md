@@ -649,6 +649,26 @@ docker compose run --rm api python -m cli seed-demo    # idempotent demo data
 open http://localhost:3000                             # sign in with DASHBOARD_PASSWORD
 ```
 
+If your database was already seeded before this branch, `seed-demo` will
+skip re-inserting anything -- `_already_seeded` only checks whether any
+`seed-`-prefixed business exists, so it never notices that the new
+harvestable `RawPayload` (seed-01) and `Contact` (seed-02) rows are missing.
+"Harvest from website" on seed-01 will then report `created: 0` and look
+broken. Fix it by deleting the old seed rows and reseeding:
+
+```bash
+docker compose exec db psql -U postgres -d leadgen -c "
+  DELETE FROM signals     WHERE business_id IN (SELECT id FROM businesses WHERE cid LIKE 'seed-%');
+  DELETE FROM scores      WHERE business_id IN (SELECT id FROM businesses WHERE cid LIKE 'seed-%');
+  DELETE FROM raw_payloads WHERE business_id IN (SELECT id FROM businesses WHERE cid LIKE 'seed-%');
+  DELETE FROM contacts    WHERE business_id IN (SELECT id FROM businesses WHERE cid LIKE 'seed-%');
+  DELETE FROM reviews     WHERE business_id IN (SELECT id FROM businesses WHERE cid LIKE 'seed-%');
+  DELETE FROM businesses  WHERE cid LIKE 'seed-%';
+  DELETE FROM runs WHERE (status = 'complete' AND created_at = '2026-09-01 09:00:00')
+                      OR (status = 'failed'   AND created_at = '2026-09-01 10:00:00');"
+docker compose run --rm api python -m cli seed-demo
+```
+
 `web` reaches the API at `http://api:8000` — the compose service name, never
 `localhost`. Only the browser talks to Next.js and only Next.js talks to the
 API, so `API_KEY` lives in the `web` container's environment and is never

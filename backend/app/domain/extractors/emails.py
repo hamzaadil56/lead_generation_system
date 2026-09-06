@@ -154,8 +154,9 @@ def _score(email: str, site_domain: str | None,
                 return 0.8, DOMAIN_VARIANT
 
     name_stem = _name_stem(business_name)
-    if stem and name_stem and (stem == name_stem
-                               or _is_variant_of(stem, name_stem)):
+    if stem and name_stem and (
+            (stem == name_stem and _passes_guards(stem))
+            or _is_variant_of(stem, name_stem)):
         return 0.75, MATCHES_BUSINESS_NAME
 
     return 0.3, UNRELATED

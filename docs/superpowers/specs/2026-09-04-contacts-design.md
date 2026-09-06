@@ -489,8 +489,13 @@ filters walks every business in the database.
 On the lead detail page, below Manual facts:
 
 - The contact list, primary first. Each row shows name, designation, email,
-  and — for harvested rows — a muted confidence chip and the
-  `discovery_note` text.
+  and — for harvested rows — the `discovery_note` text. The `discovery_note`
+  supersedes the confidence chip described in an earlier draft of this
+  section: the note already carries the tier qualitatively ("matches the
+  website domain", "free mail provider", "unrelated domain — may be a third
+  party"), and §5.5 treats confidence as a sort key rather than a display
+  value, so a number beside the note would add nothing to a human deciding
+  whether to confirm.
 - Unconfirmed rows carry an **Unconfirmed** badge and a **Confirm** button.
   Every row has **Delete**.
 - The card footer reads: *"Unconfirmed contacts are not included in the
@@ -547,14 +552,25 @@ Pure and fast. Must cover: `mailto:` extraction; bare addresses in text; every
 junk prefix; every vendor domain; the `logo@2x.png` asset false positive;
 in-page deduplication keeping the highest confidence.
 
-And every confidence tier by name, including the two the guards exist for:
+And every confidence tier by name, including the two the guards exist for.
+The domains below are written `.com` for readability; §10.1 requires invented
+domains, so the shipped fixtures use the RFC 6761 reserved TLDs instead —
+`.test` throughout, and `.example` for the one case that needs the email's
+TLD to differ from the site's while the stem matches (the 0.85 tier).
 
 - `john@leisuration.com` vs site `leisuration.com` → 0.9
 - `john@mail.leisuration.com` vs site `leisuration.com` → 0.9
 - `john@leisuration.net` vs site `leisuration.com` → 0.85
 - **`john@tryleisuration.com` vs site `leisuration.com` → 0.8**
 - `john@leisurationhvac.com` vs site `leisuration.com` → 0.8
-- `john@leisuration.com` vs site `leisurationair.com`, name "Leisuration Air" → 0.75
+- `john@leisuration.com` vs site `coolbreezehvac.com`, name "Leisuration Air
+  Conditioning, LLC" → 0.75 — the site must be unrelated to the name for this
+  tier to be reachable at all. A site like `leisurationair.com` does NOT work
+  here: its stem starts with `leisuration`, so the containment tier
+  (`_boundary_contains`) fires first and returns 0.8 before the business-name
+  tier is ever checked. The shipped test in
+  `tests/unit/test_email_extractor.py` uses `coolbreezehvac.test` for exactly
+  this reason.
 - **`john@gmail.com` → 0.6, never a similarity tier**
 - `hello@somewebdesignco.com` → 0.3
 - **`john@pipeline.com` vs site `pipe.com` → 0.3, not 0.8** — isolates the
