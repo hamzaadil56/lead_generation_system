@@ -193,7 +193,7 @@ loose, so it is gated by two independent guards, and both are needed:
 - **A five-character floor.** Without it, a business at `pipe.test` would
   match `john@pipeline.com`, because `pipe` really is a prefix of `pipeline`.
 - **A denylist of generic trade words** — `hvac`, `air`, `heating`,
-  `plumbing`, and about twenty others. Without it, `acmeplumbing.test` would
+  `plumbing`, and 24 others. Without it, `acmeplumbing.test` would
   match `john@plumbing.com`, because `plumbing` is eight letters and clears
   the length floor easily.
 
@@ -593,6 +593,16 @@ handful of minor items were deferred deliberately; they are listed below.
 - **Neither lead-detail form confirms a save.** The value persists, but nothing
   says so — a `<Toaster />` is mounted and unused. The most-used screen in the
   app, so worth doing before real daily use.
+- **Clicking Confirm or Delete on a contact shows nothing if it fails.**
+  `frontend/components/contacts-card.tsx` wires `onConfirm`/`onDelete`
+  straight through with no `.then`/`.catch`, unlike `handleAdd`, which has
+  one. A failed confirm shows the user nothing while the contact silently
+  stays out of the export — exactly the confusion the confirm gate exists to
+  prevent, and reachable on an everyday network hiccup, not just a rare edge
+  case. This is the same silent-failure shape the add-contact form had and
+  was fixed for during Task 8's review; it survived here because that
+  review's finding was scoped to add, not to confirm and delete. Worth the
+  same fix.
 
 **Deliberately deferred**, none with a failure scenario today:
 
@@ -608,17 +618,12 @@ handful of minor items were deferred deliberately; they are listed below.
   "Page 99 of 1"; the runs pagination drops other query parameters.
 - Outcome notes are write-only — saved, never displayed back.
 - The Dockerfiles run as root; the compose services have no restart policy.
-- Clicking **Confirm** or **Delete** on a contact that fails server-side shows
-  nothing — no toast, no inline message, just a console warning about an
-  unhandled rejection. The contact silently stays exactly as it was, which on
-  a failed confirm means it silently stays out of the export. This is the same
-  silent-failure shape the add-contact form had and was fixed for during
-  Task 8's review; it survived here because that review's finding was scoped
-  to add, not to confirm and delete. Worth the same fix.
-- Two people confirming or editing the same contact's email at the same
+- Two people creating or editing a contact with the same email at the same
   instant could still both get past the pre-insert duplicate check and hit
   the database's unique constraint as a raw `IntegrityError` rather than a
-  clean 409. Single-admin usage makes this unlikely in practice; the
+  clean 409. (`confirm_contact` itself only reads and sets `confirmed_at` —
+  it never touches `email` and runs no duplicate check, so confirming is not
+  part of this race.) Single-admin usage makes this unlikely in practice; the
   `_clear_other_primaries` path elsewhere already treats its own unique index
   as a backstop for exactly this race, and the duplicate-email check does not.
 
