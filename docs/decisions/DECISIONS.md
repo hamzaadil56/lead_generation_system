@@ -761,6 +761,8 @@ not change, because every API call already goes through one server-side module.
 
 ## ADR-027 — The contacts form is out of scope for the dashboard
 
+**Status:** Superseded by ADR-028 (2026-09-05).
+
 **Context.** Spec section 9 lists a contacts form on the lead detail screen and
 user story 11 covers adding a contact email. The `contacts` table exists, but
 no API endpoint serves it.
@@ -774,3 +776,43 @@ workflow nobody has run yet, and a form that writes rows nothing reads.
 
 **Consequences.** 14 of the spec's 15 frontend user stories are covered. Adding
 contacts later needs a router, schemas, and repository reads before any UI.
+
+## ADR-028 — Contacts are in scope; harvest is a service, not a pipeline stage
+
+**Context.** ADR-027 put the contacts form out of scope because no endpoint
+served the table. The system now needs email outreach, which needs contacts.
+
+**Decision.** Build contacts: manual entry plus an insert-only harvest over
+cached `raw_payloads.raw_text`. Harvest is a service called from the API and
+the CLI, never a pipeline stage.
+
+**Why.** A new `Business.status` would force every existing business through a
+new state and couple discovery to a run's lifecycle and circuit breaker, and
+harvest must work retrospectively on businesses scraped weeks ago — already
+past any status a new stage could select. `contacts` is also PERMANENT
+(ADR-008): a stage that rebuilt it would delete what a human typed. Insert-only
+plus a unique constraint on `(business_id, email)` makes re-running free and
+idempotent.
+
+**Consequences.** All 15 spec frontend user stories are now covered.
+Harvesting does not happen automatically during a run; it is two buttons and a
+CLI command. Wiring it into `execute_run` later is a small change.
+
+## ADR-029 — `confirmed_at` and `verification_status` record different facts
+
+**Context.** `contacts.verification_status` already existed with the values
+`unverified|valid|risky|invalid|catch_all`. Reusing it for the export's
+confirm gate would have needed no migration.
+
+**Decision.** Add `confirmed_at`. Leave `verification_status` NULL and unexposed.
+
+**Why.** They answer different questions. `verification_status` asks *is this
+address deliverable?* — nothing in v1 knows. `confirmed_at` asks *did a human
+decide this is a person worth emailing?* A human confirming `info@acme.com`
+tells you nothing about whether it bounces. Collapsing them would leave the v2
+verifier's column already occupied by a different meaning, and is the same
+mistake `on_missing: skip` avoids by distinguishing unknown from false.
+
+**Consequences.** One extra column. `ContactOut` omits `verification_status`
+entirely, so a permanent "unverified" badge can never appear beside
+"Confirmed" and invite the conflation.
